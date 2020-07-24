@@ -18,27 +18,31 @@
  */
 package org.apache.pinot.integration.tests;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
-import org.apache.avro.reflect.Nullable;
-import org.apache.commons.configuration.Configuration;
+
 import org.apache.commons.io.FileUtils;
 import org.apache.helix.ZNRecord;
-import org.apache.pinot.common.config.TableConfig;
-import org.apache.pinot.common.config.TableNameBuilder;
+import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.common.utils.CommonConstants;
-import org.apache.pinot.common.utils.CommonConstants.Helix.TableType;
 import org.apache.pinot.controller.ControllerConf;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.util.TestUtils;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import com.fasterxml.jackson.databind.JsonNode;
 
 
 /**
@@ -55,55 +59,57 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
 
   private final boolean _isDirectAlloc = RANDOM.nextBoolean();
   private final boolean _isConsumerDirConfigured = RANDOM.nextBoolean();
+  private final boolean _enableSplitCommit = RANDOM.nextBoolean();
   private final boolean _enableLeadControllerResource = RANDOM.nextBoolean();
   private final long _startTime = System.currentTimeMillis();
-
-  @BeforeClass
-  @Override
-  public void setUp()
-      throws Exception {
-    System.out.println(String.format(
-        "Using random seed: %s, isDirectAlloc: %s, isConsumerDirConfigured: %s, enableLeadControllerResource: %s",
-        RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured, _enableLeadControllerResource));
-
-    // Remove the consumer directory
-    File consumerDirectory = new File(CONSUMER_DIRECTORY);
-    if (consumerDirectory.exists()) {
-      FileUtils.deleteDirectory(consumerDirectory);
-    }
-
-    super.setUp();
-  }
-
-  @Override
-  public void startController() {
-    ControllerConf controllerConfig = getDefaultControllerConfiguration();
-    controllerConfig.setHLCTablesAllowed(false);
-    controllerConfig.setSplitCommit(true);
-    startController(controllerConfig);
-    enableResourceConfigForLeadControllerResource(_enableLeadControllerResource);
-  }
 
   @Override
   protected boolean useLlc() {
     return true;
   }
 
-  @Nullable
   @Override
   protected String getLoadMode() {
-    return "MMAP";
+    return ReadMode.mmap.name();
   }
 
   @Override
-  protected void overrideServerConf(Configuration configuration) {
+  public void startController() {
+    Map<String, Object> properties = getDefaultControllerConfiguration();
+    
+    properties.put(ControllerConf.ALLOW_HLC_TABLES, false);
+    properties.put(ControllerConf.ENABLE_SPLIT_COMMIT, _enableSplitCommit);
+    
+    startController(properties);
+    enableResourceConfigForLeadControllerResource(_enableLeadControllerResource);
+  }
+
+  @Override
+  protected void overrideServerConf(PinotConfiguration configuration) {
     configuration.setProperty(CommonConstants.Server.CONFIG_OF_REALTIME_OFFHEAP_ALLOCATION, true);
     configuration.setProperty(CommonConstants.Server.CONFIG_OF_REALTIME_OFFHEAP_DIRECT_ALLOCATION, _isDirectAlloc);
     if (_isConsumerDirConfigured) {
       configuration.setProperty(CommonConstants.Server.CONFIG_OF_CONSUMER_DIR, CONSUMER_DIRECTORY);
     }
-    configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_SPLIT_COMMIT, true);
-    configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_COMMIT_END_WITH_METADATA, true);
+    if (_enableSplitCommit) {
+      configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_SPLIT_COMMIT, true);
+      configuration.setProperty(CommonConstants.Server.CONFIG_OF_ENABLE_COMMIT_END_WITH_METADATA, true);
+    }
+    configuration.setProperty(CommonConstants.Server.CONFIG_OF_INSTANCE_RELOAD_CONSUMING_SEGMENT, true);
+  }
+
+  @BeforeClass
+  @Override
+  public void setUp()
+      throws Exception {
+    System.out.println(String.format(
+        "Using random seed: %s, isDirectAlloc: %s, isConsumerDirConfigured: %s, enableSplitCommit: %s, enableLeadControllerResource: %s",
+        RANDOM_SEED, _isDirectAlloc, _isConsumerDirConfigured, _enableSplitCommit, _enableLeadControllerResource));
+
+    // Remove the consumer directory
+    FileUtils.deleteQuietly(new File(CONSUMER_DIRECTORY));
+
+    super.setUp();
   }
 
   @Test
@@ -134,8 +140,10 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
     assertEquals(queryResponse.get("totalDocs").asLong(), numTotalDocs);
     assertTrue(queryResponse.get("numEntriesScannedInFilter").asLong() > 0L);
 
-    updateRealtimeTableConfig(getTableName(), UPDATED_INVERTED_INDEX_COLUMNS, null);
-    sendPostRequest(_controllerRequestURLBuilder.forTableReload(getTableName(), "realtime"), null);
+    TableConfig tableConfig = getRealtimeTableConfig();
+    tableConfig.getIndexingConfig().setInvertedIndexColumns(UPDATED_INVERTED_INDEX_COLUMNS);
+    updateTableConfig(tableConfig);
+    reloadRealtimeTable(getTableName());
 
     TestUtils.waitForCondition(aVoid -> {
       try {
@@ -155,8 +163,14 @@ public class LLCRealtimeClusterIntegrationTest extends RealtimeClusterIntegratio
   @Test(expectedExceptions = IOException.class)
   public void testAddHLCTableShouldFail()
       throws IOException {
-    TableConfig tableConfig = new TableConfig.Builder(TableType.REALTIME).setTableName("testTable")
+    TableConfig tableConfig = new TableConfigBuilder(TableType.REALTIME).setTableName("testTable")
         .setStreamConfigs(Collections.singletonMap("stream.kafka.consumer.type", "HIGHLEVEL")).build();
-    sendPostRequest(_controllerRequestURLBuilder.forTableCreate(), tableConfig.toJsonConfigString());
+    sendPostRequest(_controllerRequestURLBuilder.forTableCreate(), tableConfig.toJsonString());
+  }
+
+  @Test
+  public void testReload()
+      throws Exception {
+    testReload(false);
   }
 }

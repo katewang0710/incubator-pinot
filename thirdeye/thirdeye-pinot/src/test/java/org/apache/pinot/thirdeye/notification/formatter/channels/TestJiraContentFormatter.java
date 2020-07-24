@@ -25,12 +25,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import org.apache.commons.io.IOUtils;
+import org.apache.pinot.thirdeye.anomaly.AnomalyType;
 import org.apache.pinot.thirdeye.anomaly.ThirdEyeAnomalyConfiguration;
+import org.apache.pinot.thirdeye.anomalydetection.context.AnomalyResult;
+import org.apache.pinot.thirdeye.common.restclient.MockThirdEyeRcaRestClient;
+import org.apache.pinot.thirdeye.common.restclient.ThirdEyeRcaRestClient;
+import org.apache.pinot.thirdeye.constant.AnomalyResultSource;
 import org.apache.pinot.thirdeye.datalayer.bao.DAOTestBase;
 import org.apache.pinot.thirdeye.datalayer.bao.DatasetConfigManager;
 import org.apache.pinot.thirdeye.datalayer.bao.DetectionAlertConfigManager;
@@ -48,7 +52,11 @@ import org.apache.pinot.thirdeye.detection.alert.scheme.DetectionAlertScheme;
 import org.apache.pinot.thirdeye.notification.commons.JiraConfiguration;
 import org.apache.pinot.thirdeye.notification.commons.JiraEntity;
 import org.apache.pinot.thirdeye.notification.content.BaseNotificationContent;
+import org.apache.pinot.thirdeye.notification.content.templates.MetricAnomaliesContent;
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -79,10 +87,13 @@ public class TestJiraContentFormatter {
   private Long detectionConfigId;
   private Long subsId1;
   private Long subsId2;
+  private DAOTestBase testDAOProvider;
+  private List<AnomalyResult> anomalies;
+  private MetricAnomaliesContent metricAnomaliesContent;
 
   @BeforeMethod
   public void beforeMethod() throws Exception {
-    DAOTestBase.getInstance();
+    testDAOProvider = DAOTestBase.getInstance();
     DAORegistry daoRegistry = DAORegistry.getInstance();
     this.alertConfigDAO = daoRegistry.getDetectionAlertConfigManager();
     this.anomalyDAO = daoRegistry.getMergedAnomalyResultDAO();
@@ -104,14 +115,34 @@ public class TestJiraContentFormatter {
     subsId1 = this.alertConfigDAO.save(this.alertConfigDTO);
     this.alertConfigDTO.setId(subsId1);
 
+    anomalies = new ArrayList<>();
+    DateTimeZone dateTimeZone = DateTimeZone.forID("America/Los_Angeles");
     MergedAnomalyResultDTO anomalyResultDTO = new MergedAnomalyResultDTO();
-    anomalyResultDTO.setStartTime(1000L);
-    anomalyResultDTO.setEndTime(2000L);
+    anomalyResultDTO.setStartTime(new DateTime(2020, 1, 1, 10, 5, dateTimeZone).getMillis());
+    anomalyResultDTO.setEndTime(new DateTime(2020, 1, 2, 10, 5, dateTimeZone).getMillis());
     anomalyResultDTO.setDetectionConfigId(this.detectionConfigId);
     anomalyResultDTO.setCollection(COLLECTION_VALUE);
     anomalyResultDTO.setMetric(METRIC_VALUE);
+    anomalyResultDTO.setType(AnomalyType.DEVIATION);
     anomalyResultDTO.setMetricUrn("thirdeye:metric:123:key%3Dvalue");
     this.anomalyDAO.save(anomalyResultDTO);
+    anomalies.add(anomalyResultDTO);
+
+    MergedAnomalyResultDTO anomalyResultDTO2 = new MergedAnomalyResultDTO();
+    anomalyResultDTO2.setStartTime(new DateTime(2020, 1, 1, 10, 5, dateTimeZone).getMillis());
+    anomalyResultDTO2.setEndTime(new DateTime(2020, 1, 1, 22, 50, dateTimeZone).getMillis());
+    anomalyResultDTO2.setDetectionConfigId(this.detectionConfigId);
+    anomalyResultDTO2.setCollection(COLLECTION_VALUE);
+    anomalyResultDTO2.setMetric(METRIC_VALUE);
+    anomalyResultDTO2.setType(AnomalyType.DATA_SLA);
+    anomalyResultDTO2.setAnomalyResultSource(AnomalyResultSource.DATA_QUALITY_DETECTION);
+    anomalyResultDTO2.setMetricUrn("thirdeye:metric:124");
+    Map<String, String> props = new HashMap<>();
+    props.put("sla", "2_HOURS");
+    props.put("datasetLastRefreshTime", "" + new DateTime(2020, 1, 1, 10, 5, dateTimeZone).getMillis());
+    anomalyResultDTO2.setProperties(props);
+    this.anomalyDAO.save(anomalyResultDTO2);
+    anomalies.add(anomalyResultDTO2);
 
     DatasetConfigDTO datasetConfigDTO = new DatasetConfigDTO();
     datasetConfigDTO.setDataset(COLLECTION_VALUE);
@@ -121,6 +152,16 @@ public class TestJiraContentFormatter {
     this.alertConfigDimAlerter = createDimRecipientsDetectionAlertConfig(this.detectionConfigId);
     subsId2 = this.alertConfigDAO.save(this.alertConfigDimAlerter);
     alertConfigDimAlerter.setId(subsId2);
+
+    Map<String, Object> expectedResponse = new HashMap<>();
+    expectedResponse.put("cubeResults", "{}");
+    ThirdEyeRcaRestClient rcaClient = MockThirdEyeRcaRestClient.setupMockClient(expectedResponse);
+    this.metricAnomaliesContent = new MetricAnomaliesContent(rcaClient);
+  }
+
+  @AfterClass(alwaysRun = true)
+  void afterClass() {
+    testDAOProvider.cleanup();
   }
 
   public static DetectionAlertConfigDTO createDetectionAlertConfig(Long detectionConfigId) {
@@ -216,11 +257,11 @@ public class TestJiraContentFormatter {
     jiraClientConfig.put(PROP_LABELS, Arrays.asList("test-label-1", "test-label-2"));
     jiraClientConfig.put(PROP_SUBJECT_STYLE, AlertConfigBean.SubjectType.METRICS);
 
-    BaseNotificationContent content = DetectionAlertScheme.buildNotificationContent(jiraClientConfig);
     JiraContentFormatter jiraContent = new JiraContentFormatter(
-        JiraConfiguration.createFromProperties(jiraConfiguration), jiraClientConfig, content, teConfig, this.alertConfigDTO);
+        JiraConfiguration.createFromProperties(jiraConfiguration), jiraClientConfig, this.metricAnomaliesContent, teConfig,
+        this.alertConfigDTO);
 
-    JiraEntity jiraEntity = jiraContent.getJiraEntity(ArrayListMultimap.create(), new HashSet<>(this.anomalyDAO.findAll()));
+    JiraEntity jiraEntity = jiraContent.getJiraEntity(ArrayListMultimap.create(), this.anomalies);
 
     // Assert Jira fields
     Assert.assertEquals(jiraEntity.getLabels(), Arrays.asList("test-label-1", "test-label-2", "thirdeye", "subsId=" + subsId1));
@@ -256,13 +297,13 @@ public class TestJiraContentFormatter {
     jiraClientConfig.put(PROP_LABELS, Arrays.asList("test-label-1", "test-label-2"));
     jiraClientConfig.put(PROP_SUBJECT_STYLE, AlertConfigBean.SubjectType.METRICS);
 
-    BaseNotificationContent content = DetectionAlertScheme.buildNotificationContent(jiraClientConfig);
     JiraContentFormatter jiraContent = new JiraContentFormatter(
-        JiraConfiguration.createFromProperties(jiraConfiguration), jiraClientConfig, content, teConfig, this.alertConfigDimAlerter);
+        JiraConfiguration.createFromProperties(jiraConfiguration), jiraClientConfig, this.metricAnomaliesContent,
+        teConfig, this.alertConfigDimAlerter);
 
     Multimap<String, String> dimensionKeys1 = ArrayListMultimap.create();
     dimensionKeys1.put("key", "value");
-    JiraEntity jiraEntity = jiraContent.getJiraEntity(dimensionKeys1, new HashSet<>(this.anomalyDAO.findAll()));
+    JiraEntity jiraEntity = jiraContent.getJiraEntity(dimensionKeys1, this.anomalies);
 
     // Assert Jira fields
     Assert.assertEquals(jiraEntity.getLabels(), Arrays.asList("test-label-1", "test-label-2", "thirdeye", "subsId=" + subsId2, "key=value"));

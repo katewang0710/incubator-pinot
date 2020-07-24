@@ -25,12 +25,11 @@ import java.io.File;
 import java.net.URL;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.spi.data.readers.FileFormat;
+import org.apache.pinot.spi.plugin.PluginManager;
 import org.apache.pinot.tools.admin.command.QuickstartRunner;
 
 
 public class Quickstart {
-  private Quickstart() {
-  }
 
   private static final String TAB = "\t\t";
   private static final String NEW_LINE = "\n";
@@ -51,6 +50,25 @@ public class Quickstart {
 
   public static String prettyPrintResponse(JsonNode response) {
     StringBuilder responseBuilder = new StringBuilder();
+
+    // Sql Results
+    if (response.has("resultTable")) {
+      JsonNode columns = response.get("resultTable").get("dataSchema").get("columnNames");
+      int numColumns = columns.size();
+      for (int i = 0; i < numColumns; i++) {
+        responseBuilder.append(columns.get(i).asText()).append(TAB);
+      }
+      responseBuilder.append(NEW_LINE);
+      JsonNode rows = response.get("resultTable").get("rows");
+      for (int i = 0; i < rows.size(); i++) {
+        JsonNode row = rows.get(i);
+        for (int j = 0; j < numColumns; j++) {
+          responseBuilder.append(row.get(j).asText()).append(TAB);
+        }
+        responseBuilder.append(NEW_LINE);
+      }
+      return responseBuilder.toString();
+    }
 
     // Selection query
     if (response.has("selectionResults")) {
@@ -116,96 +134,91 @@ public class Quickstart {
 
   public void execute()
       throws Exception {
-    final File quickStartDataDir = new File("quickStartData" + System.currentTimeMillis());
+    File quickstartTmpDir = new File(FileUtils.getTempDirectory(), String.valueOf(System.currentTimeMillis()));
+    File configDir = new File(quickstartTmpDir, "configs");
+    File dataDir = new File(quickstartTmpDir, "data");
+    Preconditions.checkState(configDir.mkdirs());
+    Preconditions.checkState(dataDir.mkdirs());
 
-    if (!quickStartDataDir.exists()) {
-      Preconditions.checkState(quickStartDataDir.mkdirs());
-    }
-
-    File schemaFile = new File(quickStartDataDir, "baseballStats_schema.json");
-    File dataFile = new File(quickStartDataDir, "baseballStats_data.csv");
-    File tableConfigFile = new File(quickStartDataDir, "baseballStats_offline_table_config.json");
+    File schemaFile = new File(configDir, "baseballStats_schema.json");
+    File dataFile = new File(configDir, "baseballStats_data.csv");
+    File tableConfigFile = new File(configDir, "baseballStats_offline_table_config.json");
+    File ingestionJobSpecFile = new File(configDir, "ingestionJobSpec.yaml");
 
     ClassLoader classLoader = Quickstart.class.getClassLoader();
-    URL resource = classLoader.getResource("sample_data/baseballStats_schema.json");
+    URL resource = classLoader.getResource("examples/batch/baseballStats/baseballStats_schema.json");
     com.google.common.base.Preconditions.checkNotNull(resource);
     FileUtils.copyURLToFile(resource, schemaFile);
-    resource = classLoader.getResource("sample_data/baseballStats_data.csv");
+    resource = classLoader.getResource("examples/batch/baseballStats/rawdata/baseballStats_data.csv");
     com.google.common.base.Preconditions.checkNotNull(resource);
     FileUtils.copyURLToFile(resource, dataFile);
-    resource = classLoader.getResource("sample_data/baseballStats_offline_table_config.json");
+    resource = classLoader.getResource("examples/batch/baseballStats/ingestionJobSpec.yaml");
+    com.google.common.base.Preconditions.checkNotNull(resource);
+    FileUtils.copyURLToFile(resource, ingestionJobSpecFile);
+    resource = classLoader.getResource("examples/batch/baseballStats/baseballStats_offline_table_config.json");
     com.google.common.base.Preconditions.checkNotNull(resource);
     FileUtils.copyURLToFile(resource, tableConfigFile);
 
-    File tempDir = new File("/tmp", String.valueOf(System.currentTimeMillis()));
-    Preconditions.checkState(tempDir.mkdirs());
     QuickstartTableRequest request =
-        new QuickstartTableRequest("baseballStats", schemaFile, tableConfigFile, quickStartDataDir, FileFormat.CSV);
-    final QuickstartRunner runner = new QuickstartRunner(Lists.newArrayList(request), 1, 1, 1, tempDir);
+        new QuickstartTableRequest("baseballStats", schemaFile, tableConfigFile, ingestionJobSpecFile, FileFormat.CSV);
+    final QuickstartRunner runner = new QuickstartRunner(Lists.newArrayList(request), 1, 1, 1, dataDir);
 
     printStatus(Color.CYAN, "***** Starting Zookeeper, controller, broker and server *****");
     runner.startAll();
-    printStatus(Color.CYAN, "***** Adding baseballStats schema *****");
-    runner.addSchema();
+    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      try {
+        printStatus(Color.GREEN, "***** Shutting down offline quick start *****");
+        runner.stop();
+        FileUtils.deleteDirectory(quickstartTmpDir);
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
+    }));
     printStatus(Color.CYAN, "***** Adding baseballStats table *****");
     runner.addTable();
-    printStatus(Color.CYAN, "***** Building index segment for baseballStats *****");
-    runner.buildSegment();
-    printStatus(Color.CYAN, "***** Pushing segment to the controller *****");
-    runner.pushSegment();
+    printStatus(Color.CYAN, "***** Launch data ingestion job to build index segment for baseballStats and push to controller *****");
+    runner.launchDataIngestionJob();
     printStatus(Color.CYAN, "***** Waiting for 5 seconds for the server to fetch the assigned segment *****");
     Thread.sleep(5000);
 
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        try {
-          printStatus(Color.GREEN, "***** Shutting down offline quick start *****");
-          runner.stop();
-          FileUtils.deleteDirectory(quickStartDataDir);
-        } catch (Exception e) {
-          e.printStackTrace();
-        }
-      }
-    });
-
     printStatus(Color.YELLOW, "***** Offline quickstart setup complete *****");
 
-    String q1 = "select count(*) from baseballStats limit 0";
+    String q1 = "select count(*) from baseballStats limit 1";
     printStatus(Color.YELLOW, "Total number of documents in the table");
     printStatus(Color.CYAN, "Query : " + q1);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q1)));
     printStatus(Color.GREEN, "***************************************************");
 
-    String q2 = "select sum('runs') from baseballStats group by playerName top 5 limit 0";
+    String q2 = "select playerName, sum(runs) from baseballStats group by playerName order by sum(runs) desc limit 5";
     printStatus(Color.YELLOW, "Top 5 run scorers of all time ");
     printStatus(Color.CYAN, "Query : " + q2);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q2)));
     printStatus(Color.GREEN, "***************************************************");
 
-    String q3 = "select sum('runs') from baseballStats where yearID=2000 group by playerName top 5 limit 0";
+    String q3 = "select playerName, sum(runs) from baseballStats where yearID=2000 group by playerName order by sum(runs) desc limit 5";
     printStatus(Color.YELLOW, "Top 5 run scorers of the year 2000");
     printStatus(Color.CYAN, "Query : " + q3);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q3)));
     printStatus(Color.GREEN, "***************************************************");
 
-    String q4 = "select sum('runs') from baseballStats where yearID>=2000 group by playerName limit 0";
+    String q4 = "select playerName, sum(runs) from baseballStats where yearID>=2000 group by playerName order by sum(runs) desc limit 10";
     printStatus(Color.YELLOW, "Top 10 run scorers after 2000");
     printStatus(Color.CYAN, "Query : " + q4);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q4)));
     printStatus(Color.GREEN, "***************************************************");
 
-    String q5 = "select playerName,runs,homeRuns from baseballStats order by yearID limit 10";
+    String q5 = "select playerName, runs, homeRuns from baseballStats order by yearID limit 10";
     printStatus(Color.YELLOW, "Print playerName,runs,homeRuns for 10 records from the table and order them by yearID");
     printStatus(Color.CYAN, "Query : " + q5);
     printStatus(Color.YELLOW, prettyPrintResponse(runner.runQuery(q5)));
     printStatus(Color.GREEN, "***************************************************");
 
-    printStatus(Color.GREEN, "You can always go to http://localhost:9000/query/ to play around in the query console");
+    printStatus(Color.GREEN, "You can always go to http://localhost:9000 to play around in the query console");
   }
 
   public static void main(String[] args)
       throws Exception {
+    PluginManager.get().init();
     new Quickstart().execute();
   }
 }

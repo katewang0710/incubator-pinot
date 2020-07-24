@@ -22,22 +22,26 @@ import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOException;
+import java.net.URI;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.Utils;
-import org.apache.pinot.common.config.IndexingConfig;
-import org.apache.pinot.common.config.TableConfig;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.common.metadata.instance.InstanceZKMetadata;
 import org.apache.pinot.common.metadata.segment.LLCRealtimeSegmentZKMetadata;
 import org.apache.pinot.common.metadata.segment.RealtimeSegmentZKMetadata;
+import org.apache.pinot.common.utils.CommonConstants;
 import org.apache.pinot.common.utils.CommonConstants.Segment.Realtime.Status;
+import org.apache.pinot.common.utils.LLCSegmentName;
 import org.apache.pinot.common.utils.NamedThreadFactory;
 import org.apache.pinot.common.utils.SegmentName;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
@@ -49,8 +53,14 @@ import org.apache.pinot.core.realtime.impl.RealtimeSegmentStatsHistory;
 import org.apache.pinot.core.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.core.segment.index.loader.LoaderUtils;
 import org.apache.pinot.core.segment.virtualcolumn.VirtualColumnProviderFactory;
+import org.apache.pinot.core.util.PeerServerSegmentFinder;
+import org.apache.pinot.core.util.SchemaUtils;
+import org.apache.pinot.spi.config.table.IndexingConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+
+import static org.apache.pinot.common.utils.CommonConstants.Segment.METADATA_URI_FOR_PEER_DOWNLOAD;
 
 
 @ThreadSafe
@@ -60,6 +70,12 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
   private SegmentBuildTimeLeaseExtender _leaseExtender;
   private RealtimeSegmentStatsHistory _statsHistory;
   private final Semaphore _segmentBuildSemaphore;
+  // Maintains a map of partitionIds to semaphores.
+  // The semaphore ensures that exactly one PartitionConsumer instance consumes from any stream partition.
+  // In some streams, it's possible that having multiple consumers (with the same consumer name on the same host) consuming from the same stream partition can lead to bugs.
+  // The semaphores will stay in the hash map even if the consuming partitions move to a different host.
+  // We expect that there will be a small number of semaphores, but that may be ok.
+  private final Map<Integer, Semaphore> _partitionIdToSemaphoreMap = new ConcurrentHashMap<>();
 
   // The old name of the stats file used to be stats.ser which we changed when we moved all packages
   // from com.linkedin to org.apache because of not being able to deserialize the old files using the newer classes
@@ -238,11 +254,18 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
         LLCRealtimeSegmentZKMetadata llcSegmentMetadata = (LLCRealtimeSegmentZKMetadata) realtimeSegmentZKMetadata;
         if (realtimeSegmentZKMetadata.getStatus().equals(Status.DONE)) {
           // TODO Remove code duplication here and in LLRealtimeSegmentDataManager
-          downloadAndReplaceSegment(segmentName, llcSegmentMetadata, indexLoadingConfig);
+          downloadAndReplaceSegment(segmentName, llcSegmentMetadata, indexLoadingConfig, tableConfig);
           return;
         }
-        manager = new LLRealtimeSegmentDataManager(realtimeSegmentZKMetadata, tableConfig, instanceZKMetadata, this,
-            _indexDir.getAbsolutePath(), indexLoadingConfig, schema, _serverMetrics);
+
+        // Generates only one semaphore for every partitionId
+        LLCSegmentName llcSegmentName = new LLCSegmentName(segmentName);
+        int streamPartitionId = llcSegmentName.getPartitionId();
+        _partitionIdToSemaphoreMap.putIfAbsent(streamPartitionId, new Semaphore(1));
+        manager =
+            new LLRealtimeSegmentDataManager(realtimeSegmentZKMetadata, tableConfig, this, _indexDir.getAbsolutePath(),
+                indexLoadingConfig, schema, llcSegmentName, _partitionIdToSemaphoreMap.get(streamPartitionId),
+                _serverMetrics);
       }
       _logger.info("Initialize RealtimeSegmentDataManager - " + segmentName);
       _segmentDataManagerMap.put(segmentName, manager);
@@ -250,25 +273,88 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
   }
 
   public void downloadAndReplaceSegment(String segmentName, LLCRealtimeSegmentZKMetadata llcSegmentMetadata,
-      IndexLoadingConfig indexLoadingConfig) {
+      IndexLoadingConfig indexLoadingConfig, TableConfig tableConfig) {
     final String uri = llcSegmentMetadata.getDownloadUrl();
-    File tempSegmentFolder = new File(_indexDir, "tmp-" + segmentName + "." + System.currentTimeMillis());
-    File tempFile = new File(_indexDir, segmentName + ".tar.gz");
-    final File segmentFolder = new File(_indexDir, segmentName);
-    FileUtils.deleteQuietly(segmentFolder);
+    if (!METADATA_URI_FOR_PEER_DOWNLOAD.equals(uri)) {
+      try {
+        downloadSegmentFromDeepStore(segmentName, indexLoadingConfig, uri);
+      } catch (Exception e) {
+        _logger.warn("Download segment {} from deepstore uri {} failed.", segmentName, uri, e);
+        // Download from deep store failed; try to download from peer if peer download is setup for the table.
+        if (isPeerSegmentDownloadEnabled(tableConfig)) {
+          downloadSegmentFromPeer(segmentName, tableConfig.getValidationConfig().getPeerSegmentDownloadScheme(), indexLoadingConfig);
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      if (isPeerSegmentDownloadEnabled(tableConfig)) {
+        downloadSegmentFromPeer(segmentName, tableConfig.getValidationConfig().getPeerSegmentDownloadScheme(), indexLoadingConfig);
+      } else {
+        throw new RuntimeException("Peer segment download not enabled for segment " + segmentName);
+      }
+    }
+  }
+
+  private void downloadSegmentFromDeepStore(String segmentName, IndexLoadingConfig indexLoadingConfig, String uri) {
+    File segmentTarFile = new File(_indexDir, segmentName + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
     try {
-      SegmentFetcherFactory.fetchSegmentToLocal(uri, tempFile);
-      _logger.info("Downloaded file from {} to {}; Length of downloaded file: {}", uri, tempFile, tempFile.length());
-      TarGzCompressionUtils.unTar(tempFile, tempSegmentFolder);
-      _logger.info("Uncompressed file {} into tmp dir {}", tempFile, tempSegmentFolder);
-      FileUtils.moveDirectory(tempSegmentFolder.listFiles()[0], segmentFolder);
-      _logger.info("Replacing LLC Segment {}", segmentName);
-      replaceLLSegment(segmentName, indexLoadingConfig);
+      SegmentFetcherFactory.fetchSegmentToLocal(uri, segmentTarFile);
+      _logger.info("Downloaded file from {} to {}; Length of downloaded file: {}", uri, segmentTarFile,
+          segmentTarFile.length());
+      untarAndMoveSegment(segmentName, indexLoadingConfig, segmentTarFile);
     } catch (Exception e) {
+      _logger.warn("Failed to download segment {} from deep store: ", segmentName, e);
       throw new RuntimeException(e);
     } finally {
-      FileUtils.deleteQuietly(tempFile);
-      FileUtils.deleteQuietly(tempSegmentFolder);
+      FileUtils.deleteQuietly(segmentTarFile);
+    }
+  }
+
+  /**
+   * Untars the new segment and replaces the existing segment.
+   */
+  private void untarAndMoveSegment(String segmentName, IndexLoadingConfig indexLoadingConfig, File segmentTarFile)
+      throws IOException {
+    // TODO: This could leave temporary directories in _indexDir if JVM shuts down before the temporary directory is
+    //       deleted. Consider cleaning up all temporary directories when starting the server.
+    File tempSegmentDir = new File(_indexDir, "tmp-" + segmentName + "." + System.currentTimeMillis());
+    try {
+      File tempIndexDir = TarGzCompressionUtils.untar(segmentTarFile, tempSegmentDir).get(0);
+      _logger.info("Uncompressed file {} into tmp dir {}", segmentTarFile, tempSegmentDir);
+      File indexDir = new File(_indexDir, segmentName);
+      FileUtils.deleteQuietly(indexDir);
+      FileUtils.moveDirectory(tempIndexDir, indexDir);
+      _logger.info("Replacing LLC Segment {}", segmentName);
+      replaceLLSegment(segmentName, indexLoadingConfig);
+    } finally {
+      FileUtils.deleteQuietly(tempSegmentDir);
+    }
+  }
+
+  private boolean isPeerSegmentDownloadEnabled(TableConfig tableConfig) {
+    return CommonConstants.HTTP_PROTOCOL
+        .equalsIgnoreCase(tableConfig.getValidationConfig().getPeerSegmentDownloadScheme())
+        || CommonConstants.HTTPS_PROTOCOL
+        .equalsIgnoreCase(tableConfig.getValidationConfig().getPeerSegmentDownloadScheme());
+  }
+
+  private void downloadSegmentFromPeer(String segmentName, String downloadScheme,
+      IndexLoadingConfig indexLoadingConfig) {
+    File segmentTarFile = new File(_indexDir, segmentName + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
+    try {
+      // First find servers hosting the segment in a ONLINE state.
+      List<URI> peerSegmentURIs = PeerServerSegmentFinder.getPeerServerURIs(segmentName, downloadScheme, _helixManager);
+      // Next download the segment from a randomly chosen server using configured scheme.
+      SegmentFetcherFactory.getSegmentFetcher(downloadScheme).fetchSegmentToLocal(peerSegmentURIs, segmentTarFile);
+      _logger.info("Fetched segment {} from: {} to: {} of size: {}", segmentName, peerSegmentURIs, segmentTarFile,
+          segmentTarFile.length());
+      untarAndMoveSegment(segmentName, indexLoadingConfig, segmentTarFile);
+    } catch (Exception e) {
+      _logger.warn("Download and move segment {} from peer with scheme {} failed.", segmentName, downloadScheme, e);
+      throw new RuntimeException(e);
+    } finally {
+      FileUtils.deleteQuietly(segmentTarFile);
     }
   }
 
@@ -316,15 +402,13 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
    * If we add more validations, it may make sense to split this method into multiple validation methods.
    * But then, we are trying to figure out all the invalid cases before we return from this method...
    *
-   * @param schema
-   * @param indexingConfig
    * @return true if schema is valid.
    */
   private boolean isValid(Schema schema, IndexingConfig indexingConfig) {
     // 1. Make sure that the sorted column is not a multi-value field.
     List<String> sortedColumns = indexingConfig.getSortedColumn();
     boolean isValid = true;
-    if (!sortedColumns.isEmpty()) {
+    if (CollectionUtils.isNotEmpty(sortedColumns)) {
       final String sortedColumn = sortedColumns.get(0);
       if (sortedColumns.size() > 1) {
         _logger.warn("More than one sorted column configured. Using {}", sortedColumn);
@@ -336,10 +420,12 @@ public class RealtimeTableDataManager extends BaseTableDataManager {
       }
     }
     // 2. We want to get the schema errors, if any, even if isValid is false;
-    if (!schema.validate(_logger)) {
+    try {
+      SchemaUtils.validate(schema);
+    } catch (Exception e) {
+      _logger.error("Caught exception while validating schema: {}", schema.getSchemaName(), e);
       isValid = false;
     }
-
     return isValid;
   }
 }

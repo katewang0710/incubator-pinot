@@ -24,10 +24,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import org.apache.pinot.common.function.AggregationFunctionType;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
-import org.apache.pinot.core.data.manager.SegmentDataManager;
 import org.apache.pinot.core.indexsegment.IndexSegment;
 import org.apache.pinot.core.plan.AggregationGroupByOrderByPlanNode;
 import org.apache.pinot.core.plan.AggregationGroupByPlanNode;
@@ -42,10 +38,15 @@ import org.apache.pinot.core.plan.PlanNode;
 import org.apache.pinot.core.plan.SelectionPlanNode;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
 import org.apache.pinot.core.query.config.QueryExecutorConfig;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.FunctionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextUtils;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
 import org.apache.pinot.core.util.QueryOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 
 /**
  * The <code>InstancePlanMakerImplV2</code> class is the default implementation of {@link PlanMaker}.
@@ -85,8 +86,8 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
    */
   public InstancePlanMakerImplV2(QueryExecutorConfig queryExecutorConfig) {
     _maxInitialResultHolderCapacity = queryExecutorConfig.getConfig()
-        .getInt(MAX_INITIAL_RESULT_HOLDER_CAPACITY_KEY, DEFAULT_MAX_INITIAL_RESULT_HOLDER_CAPACITY);
-    _numGroupsLimit = queryExecutorConfig.getConfig().getInt(NUM_GROUPS_LIMIT, DEFAULT_NUM_GROUPS_LIMIT);
+        .getProperty(MAX_INITIAL_RESULT_HOLDER_CAPACITY_KEY, DEFAULT_MAX_INITIAL_RESULT_HOLDER_CAPACITY);
+    _numGroupsLimit = queryExecutorConfig.getConfig().getProperty(NUM_GROUPS_LIMIT, DEFAULT_NUM_GROUPS_LIMIT);
     Preconditions.checkState(_maxInitialResultHolderCapacity <= _numGroupsLimit,
         "Invalid configuration: maxInitialResultHolderCapacity: %d must be smaller or equal to numGroupsLimit: %d",
         _maxInitialResultHolderCapacity, _numGroupsLimit);
@@ -95,125 +96,94 @@ public class InstancePlanMakerImplV2 implements PlanMaker {
   }
 
   @Override
-  public PlanNode makeInnerSegmentPlan(IndexSegment indexSegment, BrokerRequest brokerRequest) {
-    if (brokerRequest.isSetAggregationsInfo()) {
-      if (brokerRequest.isSetGroupBy()) {
-        QueryOptions queryOptions = new QueryOptions(brokerRequest.getQueryOptions());
-        // new Combine operator only when GROUP_BY_MODE explicitly set to SQL
-        if (queryOptions.isGroupByModeSQL()) {
-          return new AggregationGroupByOrderByPlanNode(indexSegment, brokerRequest, _maxInitialResultHolderCapacity,
-              _numGroupsLimit);
-        }
-        return new AggregationGroupByPlanNode(indexSegment, brokerRequest, _maxInitialResultHolderCapacity,
-            _numGroupsLimit);
-      } else {
-        if (isFitForMetadataBasedPlan(brokerRequest, indexSegment)) {
-          return new MetadataBasedAggregationPlanNode(indexSegment, brokerRequest);
-        } else if (isFitForDictionaryBasedPlan(brokerRequest, indexSegment)) {
-          return new DictionaryBasedAggregationPlanNode(indexSegment, brokerRequest);
-        } else {
-          return new AggregationPlanNode(indexSegment, brokerRequest);
-        }
-      }
-    }
-    if (brokerRequest.isSetSelections()) {
-      return new SelectionPlanNode(indexSegment, brokerRequest);
-    }
-    throw new UnsupportedOperationException("The query contains no aggregation or selection.");
-  }
-
-  @Override
-  public Plan makeInterSegmentPlan(List<SegmentDataManager> segmentDataManagers, BrokerRequest brokerRequest,
+  public Plan makeInstancePlan(List<IndexSegment> indexSegments, QueryContext queryContext,
       ExecutorService executorService, long timeOutMs) {
-    // TODO: pass in List<IndexSegment> directly.
-    List<IndexSegment> indexSegments = new ArrayList<>(segmentDataManagers.size());
-    for (SegmentDataManager segmentDataManager : segmentDataManagers) {
-      indexSegments.add(segmentDataManager.getSegment());
-    }
-    BrokerRequestPreProcessor.preProcess(indexSegments, brokerRequest);
-
-    List<PlanNode> planNodes = new ArrayList<>();
+    List<PlanNode> planNodes = new ArrayList<>(indexSegments.size());
     for (IndexSegment indexSegment : indexSegments) {
-      planNodes.add(makeInnerSegmentPlan(indexSegment, brokerRequest));
+      planNodes.add(makeSegmentPlanNode(indexSegment, queryContext));
     }
     CombinePlanNode combinePlanNode =
-        new CombinePlanNode(planNodes, brokerRequest, executorService, timeOutMs, _numGroupsLimit);
-
+        new CombinePlanNode(planNodes, queryContext, executorService, timeOutMs, _numGroupsLimit);
     return new GlobalPlanImplV0(new InstanceResponsePlanNode(combinePlanNode));
   }
 
-  /**
-   * Helper method to identify if query is fit to be be served purely based on metadata.
-   * Currently count queries without any filters are supported.
-   * The code for supporting max and min is also in place, but disabled
-   * It would have worked only for time columns and offline and non star tree cases.
-   *
-   * @param brokerRequest Broker request
-   * @param indexSegment
-   * @return True if query can be served using metadata, false otherwise.
-   */
-  public static boolean isFitForMetadataBasedPlan(BrokerRequest brokerRequest, IndexSegment indexSegment) {
-    if (brokerRequest.getFilterQuery() != null || brokerRequest.isSetGroupBy()) {
-      return false;
+  @Override
+  public PlanNode makeSegmentPlanNode(IndexSegment indexSegment, QueryContext queryContext) {
+    if (QueryContextUtils.isAggregationQuery(queryContext)) {
+      // Aggregation query
+      List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
+      if (groupByExpressions != null) {
+        // Aggregation group-by query
+        QueryOptions queryOptions = new QueryOptions(queryContext.getQueryOptions());
+        // new Combine operator only when GROUP_BY_MODE explicitly set to SQL
+        if (queryOptions.isGroupByModeSQL()) {
+          return new AggregationGroupByOrderByPlanNode(indexSegment, queryContext, _maxInitialResultHolderCapacity,
+              _numGroupsLimit);
+        }
+        return new AggregationGroupByPlanNode(indexSegment, queryContext, _maxInitialResultHolderCapacity,
+            _numGroupsLimit);
+      } else {
+        // Aggregation only query
+        if (queryContext.getFilter() == null) {
+          if (isFitForMetadataBasedPlan(queryContext)) {
+            return new MetadataBasedAggregationPlanNode(indexSegment, queryContext);
+          } else if (isFitForDictionaryBasedPlan(queryContext, indexSegment)) {
+            return new DictionaryBasedAggregationPlanNode(indexSegment, queryContext);
+          }
+        }
+        return new AggregationPlanNode(indexSegment, queryContext);
+      }
+    } else {
+      // Selection query
+      return new SelectionPlanNode(indexSegment, queryContext);
     }
+  }
 
-    List<AggregationInfo> aggregationsInfo = brokerRequest.getAggregationsInfo();
-    if (aggregationsInfo == null) {
-      return false;
-    }
-    for (AggregationInfo aggInfo : aggregationsInfo) {
-      if (!isMetadataBasedAggregationFunction(aggInfo, indexSegment)) {
+  /**
+   * Returns {@code true} if the given aggregation-only without filter QueryContext can be solved with segment metadata,
+   * {@code false} otherwise.
+   * <p>Aggregations supported: COUNT
+   */
+  @VisibleForTesting
+  static boolean isFitForMetadataBasedPlan(QueryContext queryContext) {
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    for (ExpressionContext expression : selectExpressions) {
+      if (!expression.getFunction().getFunctionName().equals("count")) {
         return false;
       }
     }
     return true;
   }
 
-  private static boolean isMetadataBasedAggregationFunction(AggregationInfo aggregationInfo,
-      IndexSegment indexSegment) {
-    return AggregationFunctionType.getAggregationFunctionType(aggregationInfo.getAggregationType())
-        == AggregationFunctionType.COUNT;
-  }
-
   /**
-   * Helper method to identify if query is fit to be be served purely based on dictionary.
-   * It can be served through dictionary only for min, max, minmaxrange queries as of now,
-   * and if a dictionary is present for the column
-   * @param brokerRequest Broker request
-   * @param indexSegment
-   * @return True if query can be served using dictionary, false otherwise.
+   * Returns {@code true} if the given aggregation-only without filter QueryContext can be solved with dictionary,
+   * {@code false} otherwise.
+   * <p>Aggregations supported: MIN, MAX, MINMAXRANGE, DISTINCTCOUNT
    */
-  public static boolean isFitForDictionaryBasedPlan(BrokerRequest brokerRequest, IndexSegment indexSegment) {
-    // Skipping dictionary in case of star tree. Results from dictionary won't be correct
-    // because of aggregated values in metrics, and ALL value in dimension
-    if ((brokerRequest.getFilterQuery() != null) || brokerRequest.isSetGroupBy() || indexSegment.getSegmentMetadata()
-        .hasStarTree()) {
-      return false;
-    }
-    List<AggregationInfo> aggregationsInfo = brokerRequest.getAggregationsInfo();
-    if (aggregationsInfo == null) {
-      return false;
-    }
-    for (AggregationInfo aggregationInfo : aggregationsInfo) {
-      if (!isDictionaryBasedAggregationFunction(aggregationInfo, indexSegment)) {
+  @VisibleForTesting
+  static boolean isFitForDictionaryBasedPlan(QueryContext queryContext, IndexSegment indexSegment) {
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    for (ExpressionContext expression : selectExpressions) {
+      FunctionContext function = expression.getFunction();
+      String functionName = function.getFunctionName();
+      if (!AggregationFunctionUtils.isFitForDictionaryBasedComputation(functionName)) {
+        return false;
+      }
+
+      ExpressionContext argument = function.getArguments().get(0);
+      if (argument.getType() != ExpressionContext.Type.IDENTIFIER) {
+        return false;
+      }
+      String column = argument.getIdentifier();
+      Dictionary dictionary = indexSegment.getDataSource(column).getDictionary();
+      if (dictionary == null) {
+        return false;
+      }
+      // NOTE: DISTINCTCOUNT does not require sorted dictionary
+      if (!dictionary.isSorted() && !functionName.equalsIgnoreCase(AggregationFunctionType.DISTINCTCOUNT.name())) {
         return false;
       }
     }
     return true;
-  }
-
-  private static boolean isDictionaryBasedAggregationFunction(AggregationInfo aggregationInfo,
-      IndexSegment indexSegment) {
-    AggregationFunctionType functionType =
-        AggregationFunctionType.getAggregationFunctionType(aggregationInfo.getAggregationType());
-    if (functionType
-        .isOfType(AggregationFunctionType.MIN, AggregationFunctionType.MAX, AggregationFunctionType.MINMAXRANGE)) {
-      String expression = AggregationFunctionUtils.getColumn(aggregationInfo);
-      if (TransformExpressionTree.compileToExpressionTree(expression).isColumn()) {
-        Dictionary dictionary = indexSegment.getDataSource(expression).getDictionary();
-        return dictionary != null && dictionary.isSorted();
-      }
-    }
-    return false;
   }
 }

@@ -18,143 +18,76 @@
  */
 package org.apache.pinot.core.operator.dociditerators;
 
-import java.util.Arrays;
-import org.apache.commons.lang3.mutable.MutableInt;
-import org.apache.pinot.core.common.BlockMetadata;
-import org.apache.pinot.core.common.BlockMultiValIterator;
-import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.Constants;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.roaringbitmap.IntIterator;
+import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
 import org.roaringbitmap.buffer.MutableRoaringBitmap;
 
 
-public class MVScanDocIdIterator implements ScanBasedDocIdIterator {
-  BlockMultiValIterator valueIterator;
-  int currentDocId = -1;
-  final int[] intArray;
-  private int startDocId;
-  private int endDocId;
-  private PredicateEvaluator evaluator;
+/**
+ * The {@code MVScanDocIdIterator} is the scan-based iterator for MVScanDocIdSet to scan a multi-value column for the
+ * matching document ids.
+ */
+@SuppressWarnings({"rawtypes", "unchecked"})
+public final class MVScanDocIdIterator implements ScanBasedDocIdIterator {
+  private final PredicateEvaluator _predicateEvaluator;
+  private final ForwardIndexReader _reader;
+  // TODO: Figure out a way to close the reader context
+  private final ForwardIndexReaderContext _readerContext;
+  private final int _numDocs;
+  private final int[] _dictIdBuffer;
 
-  private String datasourceName;
-  private MutableInt _numEntriesScanned = new MutableInt(0);
+  private int _nextDocId = 0;
+  private long _numEntriesScanned = 0L;
 
-  public MVScanDocIdIterator(String datasourceName, BlockValSet blockValSet, BlockMetadata blockMetadata,
-      PredicateEvaluator evaluator) {
-    this.datasourceName = datasourceName;
-    this.evaluator = evaluator;
-    if (evaluator.isAlwaysFalse()) {
-      this.intArray = new int[0];
-      setStartDocId(Constants.EOF);
-      setEndDocId(Constants.EOF);
-      currentDocId = Constants.EOF;
-    } else {
-      this.intArray = new int[blockMetadata.getMaxNumberOfMultiValues()];
-      Arrays.fill(intArray, 0);
-      setStartDocId(blockMetadata.getStartDocId());
-      setEndDocId(blockMetadata.getEndDocId());
-    }
-    valueIterator = (BlockMultiValIterator) blockValSet.iterator();
-  }
-
-  /**
-   * After setting the startDocId, next calls will always return from &gt;=startDocId
-   * @param startDocId
-   */
-  public void setStartDocId(int startDocId) {
-    this.startDocId = startDocId;
-  }
-
-  /**
-   * After setting the endDocId, next call will return Constants.EOF after currentDocId exceeds
-   * endDocId
-   * @param endDocId
-   */
-  public void setEndDocId(int endDocId) {
-    this.endDocId = endDocId;
-  }
-
-  @Override
-  public boolean isMatch(int docId) {
-    if (currentDocId == Constants.EOF) {
-      return false;
-    }
-    valueIterator.skipTo(docId);
-    int length = valueIterator.nextIntVal(intArray);
-    return evaluator.applyMV(intArray, length, _numEntriesScanned);
-  }
-
-  @Override
-  public int advance(int targetDocId) {
-    if (currentDocId == Constants.EOF) {
-      return currentDocId;
-    }
-    if (targetDocId < startDocId) {
-      targetDocId = startDocId;
-    } else if (targetDocId > endDocId) {
-      currentDocId = Constants.EOF;
-    }
-    if (currentDocId >= targetDocId) {
-      return currentDocId;
-    } else {
-      currentDocId = targetDocId - 1;
-      valueIterator.skipTo(targetDocId);
-      int next = next();
-      return next;
-    }
+  public MVScanDocIdIterator(PredicateEvaluator predicateEvaluator, ForwardIndexReader reader, int numDocs,
+      int maxNumEntriesPerValue) {
+    _predicateEvaluator = predicateEvaluator;
+    _reader = reader;
+    _readerContext = reader.createContext();
+    _numDocs = numDocs;
+    _dictIdBuffer = new int[maxNumEntriesPerValue];
   }
 
   @Override
   public int next() {
-    if (currentDocId == Constants.EOF) {
-      return currentDocId;
-    }
-    while (valueIterator.hasNext() && currentDocId < endDocId) {
-      currentDocId = currentDocId + 1;
-      int length = valueIterator.nextIntVal(intArray);
-      if (evaluator.applyMV(intArray, length, _numEntriesScanned)) {
-        return currentDocId;
+    while (_nextDocId < _numDocs) {
+      int nextDocId = _nextDocId++;
+      int length = _reader.getDictIdMV(nextDocId, _dictIdBuffer, _readerContext);
+      _numEntriesScanned += length;
+      if (_predicateEvaluator.applyMV(_dictIdBuffer, length)) {
+        return nextDocId;
       }
     }
-    currentDocId = Constants.EOF;
     return Constants.EOF;
   }
 
   @Override
-  public int currentDocId() {
-    return currentDocId;
+  public int advance(int targetDocId) {
+    _nextDocId = targetDocId;
+    return next();
   }
 
   @Override
-  public String toString() {
-    return MVScanDocIdIterator.class.getSimpleName() + "[" + datasourceName + "]";
-  }
-
-  @Override
-  public MutableRoaringBitmap applyAnd(MutableRoaringBitmap answer) {
-
+  public MutableRoaringBitmap applyAnd(ImmutableRoaringBitmap docIds) {
     MutableRoaringBitmap result = new MutableRoaringBitmap();
-    if (evaluator.isAlwaysFalse()) {
-      return result;
-    }
-    IntIterator intIterator = answer.getIntIterator();
-    int docId = -1, length;
-    while (intIterator.hasNext() && docId < endDocId) {
-      docId = intIterator.next();
-      if (docId >= startDocId) {
-        valueIterator.skipTo(docId);
-        length = valueIterator.nextIntVal(intArray);
-        if (evaluator.applyMV(intArray, length, _numEntriesScanned)) {
-          result.add(docId);
-        }
+    IntIterator docIdIterator = docIds.getIntIterator();
+    int nextDocId;
+    while (docIdIterator.hasNext() && (nextDocId = docIdIterator.next()) < _numDocs) {
+      int length = _reader.getDictIdMV(nextDocId, _dictIdBuffer, _readerContext);
+      _numEntriesScanned += length;
+      if (_predicateEvaluator.applyMV(_dictIdBuffer, length)) {
+        result.add(nextDocId);
       }
     }
     return result;
   }
 
   @Override
-  public int getNumEntriesScanned() {
-    return _numEntriesScanned.intValue();
+  public long getNumEntriesScanned() {
+    return _numEntriesScanned;
   }
 }

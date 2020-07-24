@@ -35,6 +35,7 @@ import org.apache.commons.httpclient.params.HttpMethodParams;
 import org.apache.helix.ZNRecord;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.data.TimeGranularitySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,7 +81,7 @@ public class SchemaUtils {
     Preconditions.checkNotNull(schemaName);
 
     try {
-      URL url = new URL("http", host, port, "/schemas/" + schemaName);
+      URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas/" + schemaName);
       GetMethod httpGet = new GetMethod(url.toString());
       try {
         int responseCode = HTTP_CLIENT.executeMethod(httpGet);
@@ -115,7 +116,7 @@ public class SchemaUtils {
     Preconditions.checkNotNull(schema);
 
     try {
-      URL url = new URL("http", host, port, "/schemas");
+      URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas");
       PostMethod httpPost = new PostMethod(url.toString());
       try {
         Part[] parts = {new StringPart(schema.getSchemaName(), schema.toSingleLineJsonString())};
@@ -149,7 +150,7 @@ public class SchemaUtils {
     Preconditions.checkNotNull(schemaName);
 
     try {
-      URL url = new URL("http", host, port, "/schemas/" + schemaName);
+      URL url = new URL(CommonConstants.HTTP_PROTOCOL, host, port, "/schemas/" + schemaName);
       DeleteMethod httpDelete = new DeleteMethod(url.toString());
       try {
         int responseCode = HTTP_CLIENT.executeMethod(httpDelete);
@@ -188,7 +189,7 @@ public class SchemaUtils {
   public static void main(String[] args) {
     Schema schema = new Schema.SchemaBuilder().setSchemaName("testSchema")
         .addSingleValueDimension("dimension", FieldSpec.DataType.DOUBLE).addMetric("metric", FieldSpec.DataType.INT)
-        .addTime("time", TimeUnit.DAYS, FieldSpec.DataType.INT).build();
+        .addTime(new TimeGranularitySpec(FieldSpec.DataType.INT, TimeUnit.DAYS, "time"), null).build();
     System.out.println(postSchema("localhost", 8100, schema));
     Schema fetchedSchema = getSchema("localhost", 8100, "testSchema");
     Preconditions.checkNotNull(fetchedSchema);

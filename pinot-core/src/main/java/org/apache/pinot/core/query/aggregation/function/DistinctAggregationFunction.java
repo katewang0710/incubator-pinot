@@ -19,48 +19,85 @@
 package org.apache.pinot.core.query.aggregation.function;
 
 import com.google.common.base.Preconditions;
-import java.util.Iterator;
+import java.util.Arrays;
 import java.util.List;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.pinot.spi.data.FieldSpec;
+import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.pinot.common.function.AggregationFunctionType;
-import org.apache.pinot.common.request.SelectionSort;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.RowBasedBlockValueFetcher;
 import org.apache.pinot.core.data.table.Record;
 import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
-import org.apache.pinot.core.query.aggregation.DistinctTable;
 import org.apache.pinot.core.query.aggregation.ObjectAggregationResultHolder;
+import org.apache.pinot.core.query.aggregation.function.customobject.DistinctTable;
 import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
-import org.apache.pinot.pql.parsers.pql2.ast.FunctionCallAstNode;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.OrderByExpressionContext;
 
 
 /**
  * The DISTINCT clause in SQL is executed as the DISTINCT aggregation function.
- * // TODO: Support group-by
+ * TODO: Support group-by
  */
+@SuppressWarnings("rawtypes")
 public class DistinctAggregationFunction implements AggregationFunction<DistinctTable, Comparable> {
-  private DistinctTable _distinctTable;
-  private final String[] _columnNames;
+  private final List<ExpressionContext> _expressions;
+  private final String[] _columns;
+  private final List<OrderByExpressionContext> _orderByExpressions;
   private final int _limit;
-  private final List<SelectionSort> _orderBy;
 
-  private FieldSpec.DataType[] _dataTypes;
+  /**
+   * Constructor for the class.
+   *
+   * @param expressions Distinct columns to return
+   * @param orderByExpressions Order By clause
+   * @param limit Limit clause
+   */
+  public DistinctAggregationFunction(List<ExpressionContext> expressions,
+      @Nullable List<OrderByExpressionContext> orderByExpressions, int limit) {
+    _expressions = expressions;
+    int numExpressions = expressions.size();
+    _columns = new String[numExpressions];
+    for (int i = 0; i < numExpressions; i++) {
+      _columns[i] = expressions.get(i).toString();
+    }
+    _orderByExpressions = orderByExpressions;
+    _limit = limit;
+  }
 
-  DistinctAggregationFunction(String multiColumnExpression, int limit, List<SelectionSort> orderBy) {
-    _columnNames = multiColumnExpression.split(FunctionCallAstNode.DISTINCT_MULTI_COLUMN_SEPARATOR);
-    _orderBy = orderBy;
-    // use a multiplier for trim size when DISTINCT queries have ORDER BY. This logic
-    // is similar to what we have in GROUP BY with ORDER BY
-    // this does not guarantee 100% accuracy but still takes closer to it
-    _limit = CollectionUtils.isNotEmpty(_orderBy) ? limit * 5 : limit;
+  public String[] getColumns() {
+    return _columns;
+  }
+
+  public List<OrderByExpressionContext> getOrderByExpressions() {
+    return _orderByExpressions;
+  }
+
+  public int getLimit() {
+    return _limit;
   }
 
   @Override
   public AggregationFunctionType getType() {
     return AggregationFunctionType.DISTINCT;
+  }
+
+  @Override
+  public String getColumnName() {
+    return AggregationFunctionType.DISTINCT.getName() + "_" + AggregationFunctionUtils.concatArgs(_columns);
+  }
+
+  @Override
+  public String getResultColumnName() {
+    return AggregationFunctionType.DISTINCT.getName().toLowerCase() + "(" + AggregationFunctionUtils
+        .concatArgs(_columns) + ")";
+  }
+
+  @Override
+  public List<ExpressionContext> getInputExpressions() {
+    return _expressions;
   }
 
   @Override
@@ -73,84 +110,81 @@ public class DistinctAggregationFunction implements AggregationFunction<Distinct
     return new ObjectAggregationResultHolder();
   }
 
-  private ColumnDataType[] fieldSpecTypeToColumnTypes() {
-    int numColumns = _dataTypes.length;
-    ColumnDataType[] columnDataTypes = new ColumnDataType[numColumns];
-    for (int i = 0; i < numColumns; i++) {
-      switch (_dataTypes[i]) {
-        case INT:
-          columnDataTypes[i] = ColumnDataType.INT;
-          break;
-        case LONG:
-          columnDataTypes[i] = ColumnDataType.LONG;
-          break;
-        case FLOAT:
-          columnDataTypes[i] = ColumnDataType.FLOAT;
-          break;
-        case DOUBLE:
-          columnDataTypes[i] = ColumnDataType.DOUBLE;
-          break;
-        case STRING:
-          columnDataTypes[i] = ColumnDataType.STRING;
-          break;
-        case BYTES:
-          columnDataTypes[i] = ColumnDataType.BYTES;
-          break;
-        default:
-          throw new UnsupportedOperationException("DISTINCT currently does not support type: " + _dataTypes[i]);
-      }
-    }
-    return columnDataTypes;
-  }
-
   @Override
-  public void aggregate(int length, AggregationResultHolder aggregationResultHolder, BlockValSet... blockValSets) {
-    int numColumns = _columnNames.length;
-    Preconditions.checkState(blockValSets.length == numColumns, "Size mismatch: numBlockValSets = %s, numColumns = %s",
-        blockValSets.length, numColumns);
+  public void aggregate(int length, AggregationResultHolder aggregationResultHolder,
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    int numBlockValSets = blockValSetMap.size();
+    int numExpressions = _expressions.size();
+    Preconditions
+        .checkState(numBlockValSets == numExpressions, "Size mismatch: numBlockValSets = %s, numExpressions = %s",
+            numBlockValSets, numExpressions);
 
-    if (_dataTypes == null) {
-      _dataTypes = new FieldSpec.DataType[numColumns];
-      for (int i = 0; i < numColumns; i++) {
-        _dataTypes[i] = blockValSets[i].getValueType();
-      }
-      ColumnDataType[] columnDataTypes =  fieldSpecTypeToColumnTypes();
-      DataSchema dataSchema = new DataSchema(_columnNames, columnDataTypes);
-      _distinctTable = new DistinctTable(dataSchema, _orderBy, _limit);
+    BlockValSet[] blockValSets = new BlockValSet[numExpressions];
+    for (int i = 0; i < numExpressions; i++) {
+      blockValSets[i] = blockValSetMap.get(_expressions.get(i));
     }
 
-    // TODO: Follow up PR will make few changes to start using DictionaryBasedAggregationOperator
-    // for DISTINCT queries without filter.
-    RowBasedBlockValueFetcher blockValueFetcher = new RowBasedBlockValueFetcher(blockValSets);
+    DistinctTable distinctTable = aggregationResultHolder.getResult();
+    if (distinctTable == null) {
+      ColumnDataType[] columnDataTypes = new ColumnDataType[numExpressions];
+      for (int i = 0; i < numExpressions; i++) {
+        columnDataTypes[i] = ColumnDataType.fromDataTypeSV(blockValSetMap.get(_expressions.get(i)).getValueType());
+      }
+      DataSchema dataSchema = new DataSchema(_columns, columnDataTypes);
+      distinctTable = new DistinctTable(dataSchema, _orderByExpressions, _limit);
+      aggregationResultHolder.setValue(distinctTable);
+    }
 
-    int rowIndex = 0;
-    // TODO: Do early termination in the operator itself which should
-    // not call aggregate function at all if the limit has reached
-    // that will require the interface change since this function
-    // has to communicate back that required number of records have
-    // been collected
-    while (rowIndex < length) {
-      Object[] columnData = blockValueFetcher.getRow(rowIndex);
-      Record record = new Record(columnData);
-      _distinctTable.upsert(record);
-      rowIndex++;
+    // TODO: Follow up PR will make few changes to start using DictionaryBasedAggregationOperator for DISTINCT queries
+    //       without filter.
+
+    if (distinctTable.hasOrderBy()) {
+      // With order-by, no need to check whether the DistinctTable is already satisfied
+      RowBasedBlockValueFetcher blockValueFetcher = new RowBasedBlockValueFetcher(blockValSets);
+      for (int i = 0; i < length; i++) {
+        distinctTable.addWithOrderBy(new Record(blockValueFetcher.getRow(i)));
+      }
+    } else {
+      // Without order-by, early-terminate when the DistinctTable is already satisfied
+      if (distinctTable.isSatisfied()) {
+        return;
+      }
+      RowBasedBlockValueFetcher blockValueFetcher = new RowBasedBlockValueFetcher(blockValSets);
+      for (int i = 0; i < length; i++) {
+        if (distinctTable.addWithoutOrderBy(new Record(blockValueFetcher.getRow(i)))) {
+          return;
+        }
+      }
     }
   }
 
   @Override
   public DistinctTable extractAggregationResult(AggregationResultHolder aggregationResultHolder) {
-    return _distinctTable;
+    DistinctTable distinctTable = aggregationResultHolder.getResult();
+    if (distinctTable != null) {
+      return distinctTable;
+    } else {
+      ColumnDataType[] columnDataTypes = new ColumnDataType[_columns.length];
+      // NOTE: Use STRING for unknown type
+      Arrays.fill(columnDataTypes, ColumnDataType.STRING);
+      return new DistinctTable(new DataSchema(_columns, columnDataTypes), _orderByExpressions, _limit);
+    }
   }
 
+  /**
+   * NOTE: This method only handles merging of 2 main DistinctTables. It should not be used on Broker-side because it
+   *       does not support merging deserialized DistinctTables.
+   * <p>{@inheritDoc}
+   */
   @Override
-  public DistinctTable merge(DistinctTable inProgressMergedResult, DistinctTable newResultToMerge) {
-    // do the union
-    Iterator<Record> iterator = newResultToMerge.iterator();
-    while (iterator.hasNext()) {
-      Record record = iterator.next();
-      inProgressMergedResult.upsert(record);
+  public DistinctTable merge(DistinctTable intermediateResult1, DistinctTable intermediateResult2) {
+    if (intermediateResult1.size() == 0) {
+      return intermediateResult2;
     }
-    return inProgressMergedResult;
+    if (intermediateResult2.size() != 0) {
+      intermediateResult1.mergeMainDistinctTable(intermediateResult2);
+    }
+    return intermediateResult1;
   }
 
   @Override
@@ -175,13 +209,13 @@ public class DistinctAggregationFunction implements AggregationFunction<Distinct
 
   @Override
   public void aggregateGroupBySV(int length, int[] groupKeyArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
     throw new UnsupportedOperationException("Operation not supported for DISTINCT aggregation function");
   }
 
   @Override
   public void aggregateGroupByMV(int length, int[][] groupKeysArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
     throw new UnsupportedOperationException("Operation not supported for DISTINCT aggregation function");
   }
 

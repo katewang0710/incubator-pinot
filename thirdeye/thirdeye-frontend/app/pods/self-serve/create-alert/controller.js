@@ -21,7 +21,7 @@ import { checkStatus } from 'thirdeye-frontend/utils/utils';
 import {toastOptions} from 'thirdeye-frontend/utils/constants';
 import {
   selfServeApiGraph,
-  selfServeApiCommon
+  autocompleteAPI
 } from 'thirdeye-frontend/utils/api/self-serve';
 import {
   buildMetricDataUrl,
@@ -85,6 +85,12 @@ export default Controller.extend({
   subscriptionYaml:  null,            // The YAML for the subscription group
   alertDataIsCurrent: true,
   disableYamlSave: true,
+  detectionError: false,
+  detectionErrorMsg: null,
+  detectionErrorInfo: null,
+  previewError: false,
+  previewErrorMsg: null,
+  previewErrorInfo: null,
 
 
 
@@ -224,7 +230,7 @@ export default Controller.extend({
    */
   searchMetricsList: task(function* (metric) {
     yield timeout(600);
-    const autoCompleteResults = yield fetch(selfServeApiCommon.metricAutoComplete(metric)).then(checkStatus);
+    const autoCompleteResults = yield fetch(autocompleteAPI.metric(metric)).then(checkStatus);
     this.get('metricLookupCache').push(...autoCompleteResults);
     return autoCompleteResults;
   }),
@@ -251,7 +257,7 @@ export default Controller.extend({
    * @return {Promise}
    */
   fetchFunctionById(functionId) {
-    const url = selfServeApiCommon.alertById(functionId);
+    const url = autocompleteAPI.getAlertById(functionId);
     return fetch(url).then(checkStatus);
   },
 
@@ -263,7 +269,7 @@ export default Controller.extend({
    * @return {Promise}
    */
   fetchAlertsByName(functionName) {
-    const url = selfServeApiCommon.alertFunctionByName(functionName);
+    const url = autocompleteAPI.alertByName(functionName);
     return fetch(url).then(checkStatus);
   },
 
@@ -1067,6 +1073,19 @@ export default Controller.extend({
     },
 
     /**
+     * set preview error for pushing down to detection-yaml component
+     * @method setPreviewError
+     * @return {undefined}
+     */
+    setPreviewError(bubbledObject) {
+      this.setProperties({
+        previewError: bubbledObject.previewError,
+        previewErrorMsg: bubbledObject.previewErrorMsg,
+        previewErrorInfo: bubbledObject.previewErrorInfo
+      });
+    },
+
+    /**
      * update the subscription yaml string
      * @method updateSubscriptionYaml
      * @return {undefined}
@@ -1092,6 +1111,7 @@ export default Controller.extend({
      * Grabs YAML content and sends it
      */
     createAlertYamlAction() {
+      set(this, 'detectionError', false);
       const content = {
         detection: get(this, 'detectionYaml'),
         subscription: get(this, 'subscriptionYaml')
@@ -1107,15 +1127,26 @@ export default Controller.extend({
       fetch(url, postProps).then((res) => {
         res.json().then((result) => {
           if(result){
-            if (result.detectionAlertConfigId && result.detectionConfigId) {
+            if (result.subscriptionConfigId && result.detectionConfigId) {
               notifications.success('Created alert successfully.', 'Created', toastOptions);
+              this.transitionToRoute('manage.explore', result.detectionConfigId);
             } else {
               notifications.error(result.message, 'Error', toastOptions);
+              this.setProperties({
+                detectionError: true,
+                detectionErrorMsg: result.message,
+                detectionErrorInfo: result["more-info"]
+              });
             }
           }
         });
       }).catch((error) => {
         notifications.error('Create alert failed.', error, toastOptions);
+        this.setProperties({
+          detectionError: true,
+          detectionErrorMsg: 'Create alert failed.',
+          detectionErrorInfo: error
+        });
       });
     },
 

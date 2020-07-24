@@ -22,16 +22,16 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import org.apache.pinot.common.config.IndexingConfig;
-import org.apache.pinot.spi.data.DimensionFieldSpec;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.core.minion.SegmentConverter;
 import org.apache.pinot.core.minion.segment.RecordAggregator;
 import org.apache.pinot.core.minion.segment.RecordTransformer;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.data.DateTimeFieldSpec;
+import org.apache.pinot.spi.data.DimensionFieldSpec;
+import org.apache.pinot.spi.data.Schema;
 
 
 /**
@@ -42,22 +42,21 @@ import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
 public class MergeRollupSegmentConverter {
   private List<File> _inputIndexDirs;
   private File _workingDir;
-  private IndexingConfig _indexingConfig;
+  private TableConfig _tableConfig;
   private String _tableName;
   private String _segmentName;
   private MergeType _mergeType;
-  private Map<String, String> _rolllupPreAggregateType;
+  private Map<String, String> _rollupPreAggregateType;
 
-  private MergeRollupSegmentConverter(@Nonnull List<File> inputIndexDirs, @Nonnull File workingDir,
-      @Nonnull String tableName, @Nonnull String segmentName, @Nonnull String mergeType,
-      @Nullable Map<String, String> rollupPreAggregateType, @Nullable IndexingConfig indexingConfig) {
+  private MergeRollupSegmentConverter(List<File> inputIndexDirs, File workingDir, String tableName, String segmentName,
+      MergeType mergeType, TableConfig tableConfig, @Nullable Map<String, String> rollupPreAggregateType) {
     _inputIndexDirs = inputIndexDirs;
     _workingDir = workingDir;
     _tableName = tableName;
     _segmentName = segmentName;
-    _mergeType = MergeType.fromString(mergeType);
-    _rolllupPreAggregateType = rollupPreAggregateType;
-    _indexingConfig = indexingConfig;
+    _mergeType = mergeType;
+    _tableConfig = tableConfig;
+    _rollupPreAggregateType = rollupPreAggregateType;
   }
 
   public List<File> convert()
@@ -89,7 +88,7 @@ public class MergeRollupSegmentConverter {
     SegmentConverter concatenateSegmentConverter =
         new SegmentConverter.Builder().setTableName(_tableName).setSegmentName(_segmentName)
             .setInputIndexDirs(_inputIndexDirs).setWorkingDir(_workingDir).setRecordTransformer((row) -> row)
-            .setIndexingConfig(_indexingConfig).build();
+            .setTableConfig(_tableConfig).build();
 
     return concatenateSegmentConverter.convertSegment();
   }
@@ -101,14 +100,17 @@ public class MergeRollupSegmentConverter {
    */
   private List<File> rollupSegments(Schema schema)
       throws Exception {
-    // Compute group by columns for roll-up preparation (all dimensions + time column)
+    // Compute group by columns for roll-up preparation (all dimensions + date time columns + time column)
     List<String> groupByColumns = new ArrayList<>();
     for (DimensionFieldSpec dimensionFieldSpec : schema.getDimensionFieldSpecs()) {
       groupByColumns.add(dimensionFieldSpec.getName());
     }
-    String timeColumn = schema.getTimeColumnName();
-    if (timeColumn != null) {
-      groupByColumns.add(timeColumn);
+    for (DateTimeFieldSpec dateTimeFieldSpec : schema.getDateTimeFieldSpecs()) {
+      groupByColumns.add(dateTimeFieldSpec.getName());
+    }
+    String timeColumnName = _tableConfig.getValidationConfig().getTimeColumnName();
+    if (timeColumnName != null && !groupByColumns.contains(timeColumnName)) {
+      groupByColumns.add(timeColumnName);
     }
 
     // Initialize roll-up record transformer
@@ -116,13 +118,13 @@ public class MergeRollupSegmentConverter {
     RecordTransformer rollupRecordTransformer = (row) -> row;
 
     // Initialize roll-up record aggregator
-    RecordAggregator rollupRecordAggregator = new RollupRecordAggregator(schema, _rolllupPreAggregateType);
+    RecordAggregator rollupRecordAggregator = new RollupRecordAggregator(schema, _rollupPreAggregateType);
 
     SegmentConverter rollupSegmentConverter =
         new SegmentConverter.Builder().setTableName(_tableName).setSegmentName(_segmentName)
             .setInputIndexDirs(_inputIndexDirs).setWorkingDir(_workingDir).setRecordTransformer(rollupRecordTransformer)
-            .setRecordAggregator(rollupRecordAggregator).setGroupByColumns(groupByColumns)
-            .setIndexingConfig(_indexingConfig).build();
+            .setRecordAggregator(rollupRecordAggregator).setGroupByColumns(groupByColumns).setTableConfig(_tableConfig)
+            .build();
 
     return rollupSegmentConverter.convertSegment();
   }
@@ -131,13 +133,13 @@ public class MergeRollupSegmentConverter {
     // Required
     private List<File> _inputIndexDirs;
     private File _workingDir;
-    private String _mergeType;
+    private MergeType _mergeType;
     private String _tableName;
     private String _segmentName;
+    private TableConfig _tableConfig;
 
     // Optional
     private Map<String, String> _rollupPreAggregateType;
-    private IndexingConfig _indexingConfig;
 
     public Builder setInputIndexDirs(List<File> inputIndexDirs) {
       _inputIndexDirs = inputIndexDirs;
@@ -149,7 +151,7 @@ public class MergeRollupSegmentConverter {
       return this;
     }
 
-    public Builder setMergeType(String mergeType) {
+    public Builder setMergeType(MergeType mergeType) {
       _mergeType = mergeType;
       return this;
     }
@@ -159,8 +161,8 @@ public class MergeRollupSegmentConverter {
       return this;
     }
 
-    public Builder setIndexingConfig(IndexingConfig indexingConfig) {
-      _indexingConfig = indexingConfig;
+    public Builder setTableConfig(TableConfig tableConfig) {
+      _tableConfig = tableConfig;
       return this;
     }
 
@@ -176,7 +178,7 @@ public class MergeRollupSegmentConverter {
 
     public MergeRollupSegmentConverter build() {
       return new MergeRollupSegmentConverter(_inputIndexDirs, _workingDir, _tableName, _segmentName, _mergeType,
-          _rollupPreAggregateType, _indexingConfig);
+          _tableConfig, _rollupPreAggregateType);
     }
   }
 }

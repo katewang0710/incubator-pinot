@@ -19,16 +19,18 @@
 package org.apache.pinot.core.query.aggregation.function;
 
 import com.tdunning.math.stats.TDigest;
+import java.util.Map;
 import org.apache.pinot.common.function.AggregationFunctionType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
 
 
 public class PercentileTDigestMVAggregationFunction extends PercentileTDigestAggregationFunction {
 
-  public PercentileTDigestMVAggregationFunction(int percentile) {
-    super(percentile);
+  public PercentileTDigestMVAggregationFunction(ExpressionContext expression, int percentile) {
+    super(expression, percentile);
   }
 
   @Override
@@ -37,13 +39,13 @@ public class PercentileTDigestMVAggregationFunction extends PercentileTDigestAgg
   }
 
   @Override
-  public String getColumnName(String column) {
-    return AggregationFunctionType.PERCENTILETDIGEST.getName() + _percentile + "MV_" + column;
+  public String getColumnName() {
+    return AggregationFunctionType.PERCENTILETDIGEST.getName() + _percentile + "MV_" + _expression;
   }
 
   @Override
-  public String getResultColumnName(String column) {
-    return AggregationFunctionType.PERCENTILETDIGEST.getName().toLowerCase() + _percentile + "mv(" + column + ")";
+  public String getResultColumnName() {
+    return AggregationFunctionType.PERCENTILETDIGEST.getName().toLowerCase() + _percentile + "mv(" + _expression + ")";
   }
 
   @Override
@@ -52,8 +54,9 @@ public class PercentileTDigestMVAggregationFunction extends PercentileTDigestAgg
   }
 
   @Override
-  public void aggregate(int length, AggregationResultHolder aggregationResultHolder, BlockValSet... blockValSets) {
-    double[][] valuesArray = blockValSets[0].getDoubleValuesMV();
+  public void aggregate(int length, AggregationResultHolder aggregationResultHolder,
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    double[][] valuesArray = blockValSetMap.get(_expression).getDoubleValuesMV();
     TDigest tDigest = getDefaultTDigest(aggregationResultHolder);
     for (int i = 0; i < length; i++) {
       for (double value : valuesArray[i]) {
@@ -64,8 +67,8 @@ public class PercentileTDigestMVAggregationFunction extends PercentileTDigestAgg
 
   @Override
   public void aggregateGroupBySV(int length, int[] groupKeyArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
-    double[][] valuesArray = blockValSets[0].getDoubleValuesMV();
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    double[][] valuesArray = blockValSetMap.get(_expression).getDoubleValuesMV();
     for (int i = 0; i < length; i++) {
       TDigest tDigest = getDefaultTDigest(groupByResultHolder, groupKeyArray[i]);
       for (double value : valuesArray[i]) {
@@ -76,8 +79,8 @@ public class PercentileTDigestMVAggregationFunction extends PercentileTDigestAgg
 
   @Override
   public void aggregateGroupByMV(int length, int[][] groupKeysArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
-    double[][] valuesArray = blockValSets[0].getDoubleValuesMV();
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    double[][] valuesArray = blockValSetMap.get(_expression).getDoubleValuesMV();
     for (int i = 0; i < length; i++) {
       double[] values = valuesArray[i];
       for (int groupKey : groupKeysArray[i]) {

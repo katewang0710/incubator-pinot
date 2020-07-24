@@ -18,7 +18,7 @@
  */
 package org.apache.pinot.core.operator.filter.predicate;
 
-import org.apache.commons.lang3.mutable.MutableInt;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
 public abstract class BaseDictionaryBasedPredicateEvaluator extends BasePredicateEvaluator {
@@ -38,6 +38,11 @@ public abstract class BaseDictionaryBasedPredicateEvaluator extends BasePredicat
   @Override
   public final boolean isDictionaryBased() {
     return true;
+  }
+
+  @Override
+  public DataType getDataType() {
+    return DataType.INT;
   }
 
   @Override
@@ -114,24 +119,20 @@ public abstract class BaseDictionaryBasedPredicateEvaluator extends BasePredicat
    */
   @SuppressWarnings("Duplicates")
   @Override
-  public boolean applyMV(int[] dictIds, int length, MutableInt numEntriesScanned) {
+  public boolean applyMV(int[] dictIds, int length) {
     if (isExclusive()) {
       for (int i = 0; i < length; i++) {
         if (!applySV(dictIds[i])) {
-          numEntriesScanned.add(i + 1);
           return false;
         }
       }
-      numEntriesScanned.add(length);
       return true;
     } else {
       for (int i = 0; i < length; i++) {
         if (applySV(dictIds[i])) {
-          numEntriesScanned.add(i + 1);
           return true;
         }
       }
-      numEntriesScanned.add(length);
       return false;
     }
   }

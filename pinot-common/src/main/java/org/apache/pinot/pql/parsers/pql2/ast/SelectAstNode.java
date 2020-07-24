@@ -31,21 +31,18 @@ import org.apache.pinot.pql.parsers.Pql2CompilationException;
  * AST node for a SELECT statement.
  */
 public class SelectAstNode extends BaseAstNode {
+  public static final int DEFAULT_RECORD_LIMIT = 10;
   private String _tableName;
   private String _resourceName;
   private int _recordLimit = -1;
   private int _offset = -1;
   private int _topN = -1;
-
   // Optional clauses can be given in any order, so we keep track of whether we've already seen one
   private boolean _hasWhereClause = false;
   private boolean _hasGroupByClause = false;
-  private boolean _hasHavingClause = false;
   private boolean _hasOrderByClause = false;
   private boolean _hasTopClause = false;
   private boolean _hasLimitClause = false;
-
-  public static final int DEFAULT_RECORD_LIMIT = 10;
 
   public SelectAstNode() {
   }
@@ -87,13 +84,6 @@ public class SelectAstNode extends BaseAstNode {
 
       super.addChild(childNode);
       _hasGroupByClause = true;
-    } else if (childNode instanceof HavingAstNode) {
-      if (_hasHavingClause) {
-        throw new Pql2CompilationException("More than one HAVING clause specified!");
-      }
-
-      super.addChild(childNode);
-      _hasHavingClause = true;
     } else if (childNode instanceof OrderByAstNode) {
       if (_hasOrderByClause) {
         throw new Pql2CompilationException("More than one ORDER BY clause specified!");
@@ -136,10 +126,14 @@ public class SelectAstNode extends BaseAstNode {
     }
 
     // If there is a topN clause, set it on the group by
+    // if topN is not present, set it with LIMIT;
+    // if Limit is not present, set it with DEFAULT.
     GroupBy groupBy = brokerRequest.getGroupBy();
     if (groupBy != null) {
       if (_topN != -1) {
         groupBy.setTopN(_topN);
+      } else if (_recordLimit > 0) {
+        groupBy.setTopN(_recordLimit);
       } else {
         // Pinot quirk: default to top 10
         groupBy.setTopN(DEFAULT_RECORD_LIMIT);
@@ -178,20 +172,24 @@ public class SelectAstNode extends BaseAstNode {
     dataSource.setTableName(_resourceName);
     pinotQuery.setDataSource(dataSource);
     sendPinotQueryUpdateToChildren(pinotQuery);
-    if (_recordLimit != -1) {
-      pinotQuery.setLimit(_recordLimit);
-    } else {
-      // Pinot quirk: default to top 10
-      pinotQuery.setLimit(10);
-    }
     if (_offset != -1) {
       pinotQuery.setOffset(_offset);
     }
     if (pinotQuery.getGroupByListSize() > 0) {
+      // Handle GroupBy
       if (_topN != -1) {
         pinotQuery.setLimit(_topN);
+      } else if (_recordLimit > 0) {
+        pinotQuery.setLimit(_recordLimit);
       } else {
         // Pinot quirk: default to top 10
+        pinotQuery.setLimit(10);
+      }
+    } else {
+      // Handle Selection
+      if (_recordLimit != -1) {
+        pinotQuery.setLimit(_recordLimit);
+      } else {
         pinotQuery.setLimit(10);
       }
     }

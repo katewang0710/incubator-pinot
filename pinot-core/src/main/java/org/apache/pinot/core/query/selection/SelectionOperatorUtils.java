@@ -23,6 +23,7 @@ import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -31,18 +32,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
-import javax.annotation.Nullable;
-import org.apache.pinot.common.request.SelectionSort;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.response.broker.SelectionResults;
-import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.core.common.datatable.DataTableBuilder;
 import org.apache.pinot.core.indexsegment.IndexSegment;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.OrderByExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.util.ArrayCopyUtils;
-import org.apache.pinot.pql.parsers.pql2.ast.IdentifierAstNode;
+import org.apache.pinot.spi.utils.ByteArray;
 
 
 /**
@@ -68,6 +69,7 @@ public class SelectionOperatorUtils {
   private SelectionOperatorUtils() {
   }
 
+  public static final ExpressionContext IDENTIFIER_STAR = ExpressionContext.forIdentifier("*");
   public static final int MAX_ROW_HOLDER_INITIAL_CAPACITY = 10_000;
 
   private static final String INT_PATTERN = "##########";
@@ -86,68 +88,47 @@ public class SelectionOperatorUtils {
       ThreadLocal.withInitial(() -> new DecimalFormat(DOUBLE_PATTERN, DECIMAL_FORMAT_SYMBOLS));
 
   /**
-   * Extracts the expressions from a selection-only query, expands {@code 'SELECT *'} to all physical columns if
-   * applies.
+   * Extracts the expressions from a selection query, expands {@code 'SELECT *'} to all physical columns if applies.
+   * <p>Order-by expressions will be put at the front if exist. The expressions returned are deduplicated.
    * <p>NOTE: DO NOT change the order of the expressions returned because broker relies on that to process the query.
    */
-  public static List<TransformExpressionTree> extractExpressions(List<String> selectionColumns,
-      IndexSegment indexSegment) {
-    if (selectionColumns.size() == 1 && selectionColumns.get(0).equals("*")) {
-      // For 'SELECT *', sort all physical columns so that the order is deterministic
-      selectionColumns = new ArrayList<>(indexSegment.getPhysicalColumnNames());
-      selectionColumns.sort(null);
+  public static List<ExpressionContext> extractExpressions(QueryContext queryContext, IndexSegment indexSegment) {
+    Set<ExpressionContext> expressionSet = new HashSet<>();
+    List<ExpressionContext> expressions = new ArrayList<>();
 
-      List<TransformExpressionTree> expressions = new ArrayList<>(selectionColumns.size());
-      for (String selectionColumn : selectionColumns) {
-        expressions.add(new TransformExpressionTree(new IdentifierAstNode(selectionColumn)));
+    List<OrderByExpressionContext> orderByExpressions = queryContext.getOrderByExpressions();
+    if (orderByExpressions != null && queryContext.getLimit() > 0) {
+      // NOTE:
+      //   1. Order-by expressions are ignored for queries with LIMIT 0.
+      //   2. Order-by expressions are already deduped in QueryContext.
+      for (OrderByExpressionContext orderByExpression : orderByExpressions) {
+        ExpressionContext expression = orderByExpression.getExpression();
+        expressionSet.add(expression);
+        expressions.add(expression);
       }
-      return expressions;
-    } else {
-      // Note: selection expressions have been standardized during query compilation
-      Set<String> selectionColumnSet = new HashSet<>();
-      List<TransformExpressionTree> expressions = new ArrayList<>(selectionColumns.size());
-      for (String selectionColumn : selectionColumns) {
-        if (selectionColumnSet.add(selectionColumn)) {
-          expressions.add(TransformExpressionTree.compileToExpressionTree(selectionColumn));
+    }
+
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    if (selectExpressions.size() == 1 && selectExpressions.get(0).equals(IDENTIFIER_STAR)) {
+      // For 'SELECT *', sort all columns (ignore columns that start with '$') so that the order is deterministic
+      Set<String> allColumns = indexSegment.getColumnNames();
+      List<String> selectColumns = new ArrayList<>(allColumns.size());
+      for (String column : allColumns) {
+        if (column.charAt(0) != '$') {
+          selectColumns.add(column);
         }
       }
-      return expressions;
-    }
-  }
-
-  /**
-   * Extracts the expressions from a selection order-by query, expands {@code 'SELECT *'} to all physical columns if
-   * applies.
-   * <p>Order-by expressions will be put at the front. The expressions returned are deduplicated.
-   * <p>NOTE: DO NOT change the order of the expressions returned because broker relies on that to process the query.
-   */
-  public static List<TransformExpressionTree> extractExpressions(List<String> selectionColumns,
-      IndexSegment indexSegment, List<SelectionSort> sortSequence) {
-    Set<String> columnSet = new HashSet<>();
-    List<TransformExpressionTree> expressions = new ArrayList<>();
-
-    // NOTE: order-by expressions have been standardized and deduplicated during query compilation
-    for (SelectionSort selectionSort : sortSequence) {
-      String orderByColumn = selectionSort.getColumn();
-      columnSet.add(orderByColumn);
-      expressions.add(TransformExpressionTree.compileToExpressionTree(orderByColumn));
-    }
-
-    if (selectionColumns.size() == 1 && selectionColumns.get(0).equals("*")) {
-      // For 'SELECT *', sort all physical columns so that the order is deterministic
-      selectionColumns = new ArrayList<>(indexSegment.getPhysicalColumnNames());
-      selectionColumns.sort(null);
-
-      for (String selectionColumn : selectionColumns) {
-        if (!columnSet.contains(selectionColumn)) {
-          expressions.add(new TransformExpressionTree(new IdentifierAstNode(selectionColumn)));
+      selectColumns.sort(null);
+      for (String column : selectColumns) {
+        ExpressionContext expression = ExpressionContext.forIdentifier(column);
+        if (!expressionSet.contains(expression)) {
+          expressions.add(expression);
         }
       }
     } else {
-      // Note: selection expressions have been standardized during query compilation
-      for (String selectionColumn : selectionColumns) {
-        if (columnSet.add(selectionColumn)) {
-          expressions.add(TransformExpressionTree.compileToExpressionTree(selectionColumn));
+      for (ExpressionContext selectExpression : selectExpressions) {
+        if (expressionSet.add(selectExpression)) {
+          expressions.add(selectExpression);
         }
       }
     }
@@ -159,28 +140,32 @@ public class SelectionOperatorUtils {
    * Expands {@code 'SELECT *'} to all columns (excluding transform functions) within {@link DataSchema} with
    * alphabetical order if applies.
    */
-  public static List<String> getSelectionColumns(List<String> selectionColumns, DataSchema dataSchema) {
-    if (selectionColumns.size() == 1 && selectionColumns.get(0).equals("*")) {
+  public static List<String> getSelectionColumns(List<ExpressionContext> selectExpressions, DataSchema dataSchema) {
+    int numSelectExpressions = selectExpressions.size();
+    if (numSelectExpressions == 1 && selectExpressions.get(0).equals(IDENTIFIER_STAR)) {
       String[] columnNames = dataSchema.getColumnNames();
       int numColumns = columnNames.length;
 
       // Note: The data schema might be generated from DataTableBuilder.buildEmptyDataTable(), where for 'SELECT *' it
-      // will contain a single column "*". In such case, return as is to build the empty selection result.
+      //       contains a single column "*". In such case, return as is to build the empty selection result.
       if (numColumns == 1 && columnNames[0].equals("*")) {
-        return selectionColumns;
+        return Collections.singletonList("*");
       }
 
       List<String> allColumns = new ArrayList<>(numColumns);
       for (String column : columnNames) {
-        if (TransformExpressionTree.compileToExpressionTree(column).getExpressionType()
-            == TransformExpressionTree.ExpressionType.IDENTIFIER) {
+        if (QueryContextConverterUtils.getExpression(column).getType() == ExpressionContext.Type.IDENTIFIER) {
           allColumns.add(column);
         }
       }
       allColumns.sort(null);
       return allColumns;
     } else {
-      return selectionColumns;
+      List<String> columns = new ArrayList<>(numSelectExpressions);
+      for (ExpressionContext selectExpression : selectExpressions) {
+        columns.add(selectExpression.toString());
+      }
+      return columns;
     }
   }
 
@@ -210,9 +195,9 @@ public class SelectionOperatorUtils {
    * @param rowsToMerge partial results 2.
    * @param selectionSize size of the selection.
    */
-  public static void mergeWithoutOrdering(Collection<Serializable[]> mergedRows, Collection<Serializable[]> rowsToMerge,
+  public static void mergeWithoutOrdering(Collection<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
       int selectionSize) {
-    Iterator<Serializable[]> iterator = rowsToMerge.iterator();
+    Iterator<Object[]> iterator = rowsToMerge.iterator();
     while (mergedRows.size() < selectionSize && iterator.hasNext()) {
       mergedRows.add(iterator.next());
     }
@@ -226,9 +211,9 @@ public class SelectionOperatorUtils {
    * @param rowsToMerge partial results 2.
    * @param maxNumRows maximum number of rows need to be stored.
    */
-  public static void mergeWithOrdering(PriorityQueue<Serializable[]> mergedRows, Collection<Serializable[]> rowsToMerge,
+  public static void mergeWithOrdering(PriorityQueue<Object[]> mergedRows, Collection<Object[]> rowsToMerge,
       int maxNumRows) {
-    for (Serializable[] row : rowsToMerge) {
+    for (Object[] row : rowsToMerge) {
       addToPriorityQueue(row, mergedRows, maxNumRows);
     }
   }
@@ -239,20 +224,24 @@ public class SelectionOperatorUtils {
    * <p>The actual data types for each column in rows can be different but must be compatible with each other.
    * <p>Before write each row into the data table, first convert it to match the data types in data schema.
    *
+   * TODO: Type compatibility is not supported for selection order-by because all segments on the same server shared the
+   *       same comparator. Another solution is to always use the table schema to execute the query (preferable because
+   *       type compatible checks are expensive).
+   *
    * @param rows {@link Collection} of selection rows.
    * @param dataSchema data schema.
    * @return data table.
    * @throws Exception
    */
-  public static DataTable getDataTableFromRows(Collection<Serializable[]> rows, DataSchema dataSchema)
+  public static DataTable getDataTableFromRows(Collection<Object[]> rows, DataSchema dataSchema)
       throws Exception {
     int numColumns = dataSchema.size();
 
     DataTableBuilder dataTableBuilder = new DataTableBuilder(dataSchema);
-    for (Serializable[] row : rows) {
+    for (Object[] row : rows) {
       dataTableBuilder.startRow();
       for (int i = 0; i < numColumns; i++) {
-        Serializable columnValue = row[i];
+        Object columnValue = row[i];
         DataSchema.ColumnDataType columnDataType = dataSchema.getColumnDataType(i);
         switch (columnDataType) {
           // Single-value column
@@ -272,7 +261,7 @@ public class SelectionOperatorUtils {
             dataTableBuilder.setColumn(i, ((String) columnValue));
             break;
           case BYTES:
-            dataTableBuilder.setColumn(i, BytesUtils.toHexString((byte[]) columnValue));
+            dataTableBuilder.setColumn(i, (ByteArray) columnValue);
             break;
 
           // Multi-value column
@@ -340,11 +329,11 @@ public class SelectionOperatorUtils {
    * @param rowId row id.
    * @return selection row.
    */
-  public static Serializable[] extractRowFromDataTable(DataTable dataTable, int rowId) {
+  public static Object[] extractRowFromDataTable(DataTable dataTable, int rowId) {
     DataSchema dataSchema = dataTable.getDataSchema();
     int numColumns = dataSchema.size();
 
-    Serializable[] row = new Serializable[numColumns];
+    Object[] row = new Object[numColumns];
     for (int i = 0; i < numColumns; i++) {
       DataSchema.ColumnDataType columnDataType = dataSchema.getColumnDataType(i);
       switch (columnDataType) {
@@ -362,8 +351,10 @@ public class SelectionOperatorUtils {
           row[i] = dataTable.getDouble(rowId, i);
           break;
         case STRING:
-        case BYTES:
           row[i] = dataTable.getString(rowId, i);
+          break;
+        case BYTES:
+          row[i] = dataTable.getBytes(rowId, i);
           break;
 
         // Multi-value column
@@ -396,8 +387,8 @@ public class SelectionOperatorUtils {
    * Reduces a collection of {@link DataTable}s to selection rows for selection queries without <code>ORDER BY</code>.
    * (Broker side)
    */
-  public static List<Serializable[]> reduceWithoutOrdering(Collection<DataTable> dataTables, int selectionSize) {
-    List<Serializable[]> rows = new ArrayList<>(selectionSize);
+  public static List<Object[]> reduceWithoutOrdering(Collection<DataTable> dataTables, int selectionSize) {
+    List<Object[]> rows = new ArrayList<>(selectionSize);
     for (DataTable dataTable : dataTables) {
       int numRows = dataTable.getNumberOfRows();
       for (int rowId = 0; rowId < numRows; rowId++) {
@@ -422,15 +413,30 @@ public class SelectionOperatorUtils {
    * @param selectionColumns selection columns.
    * @return {@link SelectionResults} object results.
    */
-  public static SelectionResults renderSelectionResultsWithoutOrdering(List<Serializable[]> rows, DataSchema dataSchema,
+  public static SelectionResults renderSelectionResultsWithoutOrdering(List<Object[]> rows, DataSchema dataSchema,
       List<String> selectionColumns, boolean preserveType) {
     int numRows = rows.size();
-    if (!preserveType) {
-      for (int i = 0; i < numRows; i++) {
-        rows.set(i, formatRowWithoutOrdering(rows.get(i), dataSchema));
+    List<Serializable[]> resultRows = new ArrayList<>(numRows);
+    DataSchema.ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
+    int numColumns = columnDataTypes.length;
+    if (preserveType) {
+      for (Object[] row : rows) {
+        Serializable[] resultRow = new Serializable[numColumns];
+        for (int i = 0; i < numColumns; i++) {
+          resultRow[i] = convertValueToType(row[i], columnDataTypes[i]);
+        }
+        resultRows.add(resultRow);
+      }
+    } else {
+      for (Object[] row : rows) {
+        Serializable[] resultRow = new Serializable[numColumns];
+        for (int i = 0; i < numColumns; i++) {
+          resultRow[i] = getFormattedValue(row[i], columnDataTypes[i]);
+        }
+        resultRows.add(resultRow);
       }
     }
-    return new SelectionResults(selectionColumns, rows);
+    return new SelectionResults(selectionColumns, resultRows);
   }
 
   /**
@@ -443,9 +449,18 @@ public class SelectionOperatorUtils {
    * @param dataSchema data schema.
    * @return {@link ResultTable} object results.
    */
-  public static ResultTable renderResultTableWithoutOrdering(List<Serializable[]> rows, DataSchema dataSchema) {
-    List<Object[]> resultRows = new ArrayList<>(rows.size());
-    resultRows.addAll(rows);
+  public static ResultTable renderResultTableWithoutOrdering(List<Object[]> rows, DataSchema dataSchema) {
+    int numRows = rows.size();
+    List<Object[]> resultRows = new ArrayList<>(numRows);
+    DataSchema.ColumnDataType[] columnDataTypes = dataSchema.getColumnDataTypes();
+    int numColumns = columnDataTypes.length;
+    for (Object[] row : rows) {
+      Object[] resultRow = new Object[numColumns];
+      for (int i = 0; i < numColumns; i++) {
+        resultRow[i] = convertValueToType(row[i], columnDataTypes[i]);
+      }
+      resultRows.add(resultRow);
+    }
     return new ResultTable(dataSchema, resultRows);
   }
 
@@ -476,55 +491,81 @@ public class SelectionOperatorUtils {
   }
 
   /**
-   * Extract columns from the row based on the given column indices.
-   * <p>The extracted row is used to build the {@link SelectionResults}.
-   *
-   * @param row selection row to be extracted.
-   * @param columnIndices column indices.
-   * @return selection row.
-   */
-  public static Serializable[] extractColumns(Serializable[] row, int[] columnIndices,
-      @Nullable DataSchema.ColumnDataType[] columnDataTypes) {
-    int numColumns = columnIndices.length;
-    Serializable[] extractedRow = new Serializable[numColumns];
-    if (columnDataTypes == null) {
-      for (int i = 0; i < numColumns; i++) {
-        extractedRow[i] = row[columnIndices[i]];
-      }
-    } else {
-      for (int i = 0; i < numColumns; i++) {
-        extractedRow[i] = getFormattedValue(row[columnIndices[i]], columnDataTypes[i]);
-      }
-    }
-    return extractedRow;
-  }
-
-  /**
-   * Helper method to format a selection row, make all values string or string array type based on data schema passed in
-   * for selection queries without <code>ORDER BY</code>. (Broker side)
-   * <p>Formatted row is used to build the {@link SelectionResults}.
-   *
-   * @param row selection row to be formatted.
-   * @param dataSchema data schema.
-   */
-  private static Serializable[] formatRowWithoutOrdering(Serializable[] row, DataSchema dataSchema) {
-    int numColumns = row.length;
-    for (int i = 0; i < numColumns; i++) {
-      row[i] = getFormattedValue(row[i], dataSchema.getColumnDataType(i));
-    }
-    return row;
-  }
-
-  /**
-   * Format a {@link Serializable} value into a {@link String} or {@link String} array based on the data type.
-   * (Broker side)
+   * Converts a value into the given data type. (Broker side)
    * <p>Actual value type can be different with data type passed in, but they must be type compatible.
-   *
-   * @param value value to be formatted.
-   * @param dataType data type.
-   * @return formatted value.
    */
-  private static Serializable getFormattedValue(Serializable value, DataSchema.ColumnDataType dataType) {
+  public static Serializable convertValueToType(Object value, DataSchema.ColumnDataType dataType) {
+    switch (dataType) {
+      // Single-value column
+      case INT:
+        return ((Number) value).intValue();
+      case LONG:
+        return ((Number) value).longValue();
+      case FLOAT:
+        return ((Number) value).floatValue();
+      case DOUBLE:
+        return ((Number) value).doubleValue();
+      // NOTE: Return hex-encoded String for BYTES columns for backward-compatibility
+      // TODO: Revisit to see whether we should return byte[] instead
+      case BYTES:
+        return ((ByteArray) value).toHexString();
+
+      // Multi-value column
+      case LONG_ARRAY:
+        // LONG_ARRAY type covers INT_ARRAY and LONG_ARRAY
+        if (value instanceof int[]) {
+          int[] ints = (int[]) value;
+          int length = ints.length;
+          long[] longs = new long[length];
+          for (int i = 0; i < length; i++) {
+            longs[i] = ints[i];
+          }
+          return longs;
+        } else {
+          return (long[]) value;
+        }
+      case DOUBLE_ARRAY:
+        // DOUBLE_ARRAY type covers INT_ARRAY, LONG_ARRAY, FLOAT_ARRAY and DOUBLE_ARRAY
+        if (value instanceof int[]) {
+          int[] ints = (int[]) value;
+          int length = ints.length;
+          double[] doubles = new double[length];
+          for (int i = 0; i < length; i++) {
+            doubles[i] = ints[i];
+          }
+          return doubles;
+        } else if (value instanceof long[]) {
+          long[] longs = (long[]) value;
+          int length = longs.length;
+          double[] doubles = new double[length];
+          for (int i = 0; i < length; i++) {
+            doubles[i] = longs[i];
+          }
+          return doubles;
+        } else if (value instanceof float[]) {
+          float[] floats = (float[]) value;
+          int length = floats.length;
+          double[] doubles = new double[length];
+          for (int i = 0; i < length; i++) {
+            doubles[i] = floats[i];
+          }
+          return doubles;
+        } else {
+          return (double[]) value;
+        }
+
+      default:
+        // For STRING, INT_ARRAY, FLOAT_ARRAY and STRING_ARRAY, no need to format
+        return (Serializable) value;
+    }
+  }
+
+  /**
+   * Formats a value into a {@code String} (single-value column) or {@code String[]} (multi-value column) based on the
+   * data type. (Broker side)
+   * <p>Actual value type can be different with data type passed in, but they must be type compatible.
+   */
+  public static Serializable getFormattedValue(Object value, DataSchema.ColumnDataType dataType) {
     switch (dataType) {
       // Single-value column
       case INT:
@@ -535,6 +576,9 @@ public class SelectionOperatorUtils {
         return THREAD_LOCAL_FLOAT_FORMAT.get().format(((Number) value).floatValue());
       case DOUBLE:
         return THREAD_LOCAL_DOUBLE_FORMAT.get().format(((Number) value).doubleValue());
+      // NOTE: Return String for BYTES columns for backward-compatibility
+      case BYTES:
+        return ((ByteArray) value).toHexString();
 
       // Multi-value column
       case INT_ARRAY:
@@ -612,8 +656,8 @@ public class SelectionOperatorUtils {
         }
 
       default:
-        // For STRING, BYTES and STRING_ARRAY, no need to intFormat
-        return value;
+        // For STRING and STRING_ARRAY, no need to format
+        return (Serializable) value;
     }
   }
 

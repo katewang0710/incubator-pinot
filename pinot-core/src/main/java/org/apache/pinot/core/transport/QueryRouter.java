@@ -28,8 +28,8 @@ import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.InstanceRequest;
-import org.apache.pinot.common.utils.CommonConstants.Helix.TableType;
 import org.apache.pinot.common.utils.DataTable;
+import org.apache.pinot.spi.config.table.TableType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -92,6 +92,7 @@ public class QueryRouter {
         LOGGER.error("Caught exception while sending request {} to server: {}, marking query failed", requestId,
             serverRoutingInstance, e);
         _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_SEND_EXCEPTIONS, 1);
+        asyncQueryResponse.setBrokerRequestSendException(e);
         asyncQueryResponse.markQueryFailed();
         break;
       }

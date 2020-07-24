@@ -18,11 +18,8 @@
  */
 package org.apache.pinot.core.operator.query;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.pinot.common.request.Selection;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.RowBasedBlockValueFetcher;
@@ -33,6 +30,8 @@ import org.apache.pinot.core.operator.blocks.IntermediateResultsBlock;
 import org.apache.pinot.core.operator.blocks.TransformBlock;
 import org.apache.pinot.core.operator.transform.TransformOperator;
 import org.apache.pinot.core.operator.transform.TransformResultMetadata;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.selection.SelectionOperatorUtils;
 
 
@@ -41,25 +40,26 @@ public class SelectionOnlyOperator extends BaseOperator<IntermediateResultsBlock
 
   private final IndexSegment _indexSegment;
   private final TransformOperator _transformOperator;
-  private final List<TransformExpressionTree> _expressions;
+  private final List<ExpressionContext> _expressions;
   private final BlockValSet[] _blockValSets;
   private final DataSchema _dataSchema;
   private final int _numRowsToKeep;
-  private final List<Serializable[]> _rows;
+  private final List<Object[]> _rows;
 
-  private ExecutionStatistics _executionStatistics;
+  private int _numDocsScanned = 0;
 
-  public SelectionOnlyOperator(IndexSegment indexSegment, Selection selection, TransformOperator transformOperator) {
+  public SelectionOnlyOperator(IndexSegment indexSegment, QueryContext queryContext,
+      List<ExpressionContext> expressions, TransformOperator transformOperator) {
     _indexSegment = indexSegment;
     _transformOperator = transformOperator;
-    _expressions = SelectionOperatorUtils.extractExpressions(selection.getSelectionColumns(), indexSegment);
+    _expressions = expressions;
 
     int numExpressions = _expressions.size();
     _blockValSets = new BlockValSet[numExpressions];
     String[] columnNames = new String[numExpressions];
     DataSchema.ColumnDataType[] columnDataTypes = new DataSchema.ColumnDataType[numExpressions];
     for (int i = 0; i < numExpressions; i++) {
-      TransformExpressionTree expression = _expressions.get(i);
+      ExpressionContext expression = _expressions.get(i);
       TransformResultMetadata expressionMetadata = _transformOperator.getResultMetadata(expression);
       columnNames[i] = expression.toString();
       columnDataTypes[i] =
@@ -67,14 +67,12 @@ public class SelectionOnlyOperator extends BaseOperator<IntermediateResultsBlock
     }
     _dataSchema = new DataSchema(columnNames, columnDataTypes);
 
-    _numRowsToKeep = selection.getSize();
+    _numRowsToKeep = queryContext.getLimit();
     _rows = new ArrayList<>(Math.min(_numRowsToKeep, SelectionOperatorUtils.MAX_ROW_HOLDER_INITIAL_CAPACITY));
   }
 
   @Override
   protected IntermediateResultsBlock getNextBlock() {
-    int numDocsScanned = 0;
-
     TransformBlock transformBlock;
     while ((transformBlock = _transformOperator.nextBlock()) != null) {
       int numExpressions = _expressions.size();
@@ -84,7 +82,7 @@ public class SelectionOnlyOperator extends BaseOperator<IntermediateResultsBlock
       RowBasedBlockValueFetcher blockValueFetcher = new RowBasedBlockValueFetcher(_blockValSets);
 
       int numDocsToAdd = Math.min(_numRowsToKeep - _rows.size(), transformBlock.getNumDocs());
-      numDocsScanned += numDocsToAdd;
+      _numDocsScanned += numDocsToAdd;
       for (int i = 0; i < numDocsToAdd; i++) {
         _rows.add(blockValueFetcher.getRow(i));
       }
@@ -92,14 +90,6 @@ public class SelectionOnlyOperator extends BaseOperator<IntermediateResultsBlock
         break;
       }
     }
-
-    // Create execution statistics.
-    long numEntriesScannedInFilter = _transformOperator.getExecutionStatistics().getNumEntriesScannedInFilter();
-    long numEntriesScannedPostFilter = numDocsScanned * _transformOperator.getNumColumnsProjected();
-    long numTotalRawDocs = _indexSegment.getSegmentMetadata().getTotalRawDocs();
-    _executionStatistics =
-        new ExecutionStatistics(numDocsScanned, numEntriesScannedInFilter, numEntriesScannedPostFilter,
-            numTotalRawDocs);
 
     return new IntermediateResultsBlock(_dataSchema, _rows);
   }
@@ -111,6 +101,10 @@ public class SelectionOnlyOperator extends BaseOperator<IntermediateResultsBlock
 
   @Override
   public ExecutionStatistics getExecutionStatistics() {
-    return _executionStatistics;
+    long numEntriesScannedInFilter = _transformOperator.getExecutionStatistics().getNumEntriesScannedInFilter();
+    long numEntriesScannedPostFilter = (long) _numDocsScanned * _transformOperator.getNumColumnsProjected();
+    int numTotalDocs = _indexSegment.getSegmentMetadata().getTotalDocs();
+    return new ExecutionStatistics(_numDocsScanned, numEntriesScannedInFilter, numEntriesScannedPostFilter,
+        numTotalDocs);
   }
 }

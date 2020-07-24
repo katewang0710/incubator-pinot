@@ -20,12 +20,8 @@ package org.apache.pinot.common.utils.request;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.Stack;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNumericLiteral;
 import org.apache.commons.lang.mutable.MutableInt;
@@ -35,13 +31,8 @@ import org.apache.pinot.common.request.ExpressionType;
 import org.apache.pinot.common.request.FilterQuery;
 import org.apache.pinot.common.request.FilterQueryMap;
 import org.apache.pinot.common.request.Function;
-import org.apache.pinot.common.request.HavingFilterQuery;
-import org.apache.pinot.common.request.HavingFilterQueryMap;
 import org.apache.pinot.common.request.Identifier;
 import org.apache.pinot.common.request.Literal;
-import org.apache.pinot.common.request.Selection;
-import org.apache.pinot.common.request.SelectionSort;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.pql.parsers.pql2.ast.AstNode;
 import org.apache.pinot.pql.parsers.pql2.ast.FloatingPointLiteralAstNode;
 import org.apache.pinot.pql.parsers.pql2.ast.FunctionCallAstNode;
@@ -50,6 +41,7 @@ import org.apache.pinot.pql.parsers.pql2.ast.IntegerLiteralAstNode;
 import org.apache.pinot.pql.parsers.pql2.ast.LiteralAstNode;
 import org.apache.pinot.pql.parsers.pql2.ast.PredicateAstNode;
 import org.apache.pinot.pql.parsers.pql2.ast.StringLiteralAstNode;
+import org.apache.pinot.sql.parsers.SqlCompilationException;
 
 
 public class RequestUtils {
@@ -120,18 +112,66 @@ public class RequestUtils {
         literal.setDoubleValue(node.bigDecimalValue().doubleValue());
       }
     } else {
-      literal.setStringValue(node.toString().replaceAll("^\'|\'$", ""));
+      literal.setStringValue(node.toString().replaceAll("^'|'$", "").replace("''", "'"));
     }
     expression.setLiteral(literal);
     return expression;
   }
 
-  public static Expression getLiteralExpression(String value) {
+  public static Expression createNewLiteralExpression() {
     Expression expression = new Expression(ExpressionType.LITERAL);
     Literal literal = new Literal();
-    literal.setStringValue(value);
     expression.setLiteral(literal);
     return expression;
+  }
+
+  public static Expression getLiteralExpression(String value) {
+    Expression expression = createNewLiteralExpression();
+    expression.getLiteral().setStringValue(value);
+    return expression;
+  }
+
+  public static Expression getLiteralExpression(Integer value) {
+    return getLiteralExpression(value.longValue());
+  }
+
+  public static Expression getLiteralExpression(Long value) {
+    Expression expression = createNewLiteralExpression();
+    expression.getLiteral().setLongValue(value);
+    return expression;
+  }
+
+  public static Expression getLiteralExpression(Float value) {
+    return getLiteralExpression(value.doubleValue());
+  }
+
+  public static Expression getLiteralExpression(Double value) {
+    Expression expression = createNewLiteralExpression();
+    expression.getLiteral().setDoubleValue(value);
+    return expression;
+  }
+
+  public static Expression getLiteralExpression(Object object) {
+    if (object instanceof Integer) {
+      return RequestUtils.getLiteralExpression((Integer) object);
+    }
+    if (object instanceof Long) {
+      return RequestUtils.getLiteralExpression((Long) object);
+    }
+    if (object instanceof Float) {
+      return RequestUtils.getLiteralExpression((Float) object);
+    }
+    if (object instanceof Double) {
+      return RequestUtils.getLiteralExpression((Double) object);
+    }
+    if (object instanceof String) {
+      return RequestUtils.getLiteralExpression((String) object);
+    }
+    if (object instanceof SqlLiteral) {
+      return RequestUtils.getLiteralExpression((SqlLiteral) object);
+    }
+    throw new SqlCompilationException(
+        new IllegalArgumentException("Unsupported Literal value type - " + object.getClass()));
   }
 
   public static Expression getFunctionExpression(String operator) {
@@ -139,17 +179,6 @@ public class RequestUtils {
     Function function = new Function(operator);
     expression.setFunctionCall(function);
     return expression;
-  }
-
-  public static void generateFilterFromTree(HavingQueryTree filterQueryTree, BrokerRequest request) {
-    Map<Integer, HavingFilterQuery> filterQueryMap = new HashMap<>();
-    MutableInt currentId = new MutableInt(0);
-    HavingFilterQuery root = traverseHavingFilterQueryAndPopulateMap(filterQueryTree, filterQueryMap, currentId);
-    filterQueryMap.put(root.getId(), root);
-    request.setHavingFilterQuery(root);
-    HavingFilterQueryMap mp = new HavingFilterQueryMap();
-    mp.setFilterQueryMap(filterQueryMap);
-    request.setHavingFilterSubQueryMap(mp);
   }
 
   private static FilterQuery traverseFilterQueryAndPopulateMap(FilterQueryTree tree,
@@ -174,31 +203,6 @@ public class RequestUtils {
     query.setOperator(tree.getOperator());
     query.setValue(tree.getValue());
     return query;
-  }
-
-  private static HavingFilterQuery traverseHavingFilterQueryAndPopulateMap(HavingQueryTree tree,
-      Map<Integer, HavingFilterQuery> filterQueryMap, MutableInt currentId) {
-    int currentNodeId = currentId.intValue();
-    currentId.increment();
-
-    final List<Integer> filterIds = new ArrayList<>();
-    if (null != tree.getChildren()) {
-      for (final HavingQueryTree child : tree.getChildren()) {
-        int childNodeId = currentId.intValue();
-        currentId.increment();
-        filterIds.add(childNodeId);
-        final HavingFilterQuery filterQuery = traverseHavingFilterQueryAndPopulateMap(child, filterQueryMap, currentId);
-        filterQueryMap.put(childNodeId, filterQuery);
-      }
-    }
-
-    HavingFilterQuery havingFilterQuery = new HavingFilterQuery();
-    havingFilterQuery.setAggregationInfo(tree.getAggregationInfo());
-    havingFilterQuery.setId(currentNodeId);
-    havingFilterQuery.setNestedFilterQueryIds(filterIds);
-    havingFilterQuery.setOperator(tree.getOperator());
-    havingFilterQuery.setValue(tree.getValue());
-    return havingFilterQuery;
   }
 
   /**
@@ -236,59 +240,6 @@ public class RequestUtils {
   }
 
   /**
-   * Extracts all columns from the given filter query tree.
-   */
-  public static Set<String> extractFilterColumns(FilterQueryTree root) {
-    Set<String> filterColumns = new HashSet<>();
-    if (root.getChildren() == null) {
-      root.getExpression().getColumns(filterColumns);
-    } else {
-      Stack<FilterQueryTree> stack = new Stack<>();
-      stack.add(root);
-      while (!stack.empty()) {
-        FilterQueryTree node = stack.pop();
-        for (FilterQueryTree child : node.getChildren()) {
-          if (child.getChildren() == null) {
-            child.getExpression().getColumns(filterColumns);
-          } else {
-            stack.push(child);
-          }
-        }
-      }
-    }
-    return filterColumns;
-  }
-
-  /**
-   * Extracts all columns from the given expressions.
-   */
-  public static Set<String> extractColumnsFromExpressions(Set<TransformExpressionTree> expressions) {
-    Set<String> expressionColumns = new HashSet<>();
-    for (TransformExpressionTree expression : expressions) {
-      expression.getColumns(expressionColumns);
-    }
-    return expressionColumns;
-  }
-
-  /**
-   * Extracts all columns from the given selection, '*' will be ignored.
-   */
-  public static Set<String> extractSelectionColumns(Selection selection) {
-    Set<String> selectionColumns = new LinkedHashSet<>();
-    for (String selectionColumn : selection.getSelectionColumns()) {
-      if (!selectionColumn.equals("*")) {
-        selectionColumns.add(selectionColumn);
-      }
-    }
-    if (selection.getSelectionSortSequence() != null) {
-      for (SelectionSort selectionSort : selection.getSelectionSortSequence()) {
-        selectionColumns.add(selectionSort.getColumn());
-      }
-    }
-    return selectionColumns;
-  }
-
-  /**
    * Returns the expression from a given {@link AstNode}, which can be one of the following:
    * <ul>
    *   <li> {@link FunctionCallAstNode}</li>
@@ -320,5 +271,34 @@ public class RequestUtils {
     } else {
       throw new IllegalStateException("Cannot get expression from " + astNode.getClass().getSimpleName());
     }
+  }
+
+  public static String prettyPrint(Expression expression) {
+    if (expression == null) {
+      return "null";
+    }
+    if (expression.getIdentifier() != null) {
+      return expression.getIdentifier().getName();
+    }
+    if (expression.getLiteral() != null) {
+      if (expression.getLiteral().isSetLongValue()) {
+        return Long.toString(expression.getLiteral().getLongValue());
+      }
+    }
+    if (expression.getFunctionCall() != null) {
+      String res = expression.getFunctionCall().getOperator() + "(";
+      boolean isFirstParam = true;
+      for (Expression operand : expression.getFunctionCall().getOperands()) {
+        if (!isFirstParam) {
+          res += ", ";
+        } else {
+          isFirstParam = false;
+        }
+        res += prettyPrint(operand);
+      }
+      res += ")";
+      return res;
+    }
+    return null;
   }
 }

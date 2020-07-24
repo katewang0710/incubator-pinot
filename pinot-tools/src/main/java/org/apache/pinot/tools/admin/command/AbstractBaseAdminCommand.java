@@ -23,13 +23,17 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLConnection;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
 import org.apache.commons.configuration.ConfigurationException;
-import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.pinot.tools.AbstractBaseCommand;
+import org.apache.pinot.tools.utils.PinotConfigUtils;
 
 
 /**
@@ -56,6 +60,47 @@ public class AbstractBaseAdminCommand extends AbstractBaseCommand {
     return Integer.parseInt(processName.split("@")[0]);
   }
 
+  public static String sendPostRequest(String urlString, String payload)
+      throws IOException {
+    return sendRequest("POST", urlString, payload);
+  }
+
+  public static String sendDeleteRequest(String urlString, String payload)
+      throws IOException {
+    return sendRequest("DELETE", urlString, payload);
+  }
+
+  public static String sendRequest(String requestMethod, String urlString, String payload)
+      throws IOException {
+    final URL url = new URL(urlString);
+    final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+    conn.setDoOutput(true);
+    conn.setRequestMethod(requestMethod);
+    if (payload != null) {
+      final BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(conn.getOutputStream(),
+          StandardCharsets.UTF_8));
+      writer.write(payload, 0, payload.length());
+      writer.flush();
+    }
+
+    try {
+      return readInputStream(conn.getInputStream());
+    } catch (Exception e) {
+      return readInputStream(conn.getErrorStream());
+    }
+  }
+
+  private static String readInputStream(InputStream inputStream) throws IOException {
+    final BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, "UTF-8"));
+    final StringBuilder sb = new StringBuilder();
+    String line;
+    while ((line = reader.readLine()) != null) {
+      sb.append(line);
+    }
+    return sb.toString();
+  }
+
   protected void savePID(String fileName)
       throws IOException {
     FileWriter pidFile = new FileWriter(fileName);
@@ -63,40 +108,8 @@ public class AbstractBaseAdminCommand extends AbstractBaseCommand {
     pidFile.close();
   }
 
-  public static String sendPostRequest(String urlString, String payload)
-      throws IOException {
-    final URL url = new URL(urlString);
-    final URLConnection conn = url.openConnection();
-
-    conn.setDoOutput(true);
-    final BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(conn.getOutputStream(), "UTF-8"));
-
-    writer.write(payload, 0, payload.length());
-    writer.flush();
-
-    final BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-    final StringBuilder sb = new StringBuilder();
-    String line = null;
-
-    while ((line = reader.readLine()) != null) {
-      sb.append(line);
-    }
-
-    return sb.toString();
-  }
-
-  PropertiesConfiguration readConfigFromFile(String configFileName)
+  Map<String, Object> readConfigFromFile(String configFileName)
       throws ConfigurationException {
-    if (configFileName != null) {
-      File configFile = new File(configFileName);
-
-      if (configFile.exists()) {
-        return new PropertiesConfiguration(configFile);
-      } else {
-        return null;
-      }
-    } else {
-      return null;
-    }
+    return PinotConfigUtils.readConfigFromFile(configFileName);
   }
 }

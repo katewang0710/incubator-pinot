@@ -29,18 +29,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.spi.data.FieldSpec.DataType;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.response.broker.AggregationResult;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.response.broker.GroupByResult;
 import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.core.common.ObjectSerDeUtils;
-import org.apache.pinot.spi.data.readers.GenericRow;
-import org.apache.pinot.core.data.manager.SegmentDataManager;
-import org.apache.pinot.core.data.manager.offline.ImmutableSegmentDataManager;
 import org.apache.pinot.core.data.readers.GenericRowRecordReader;
-import org.apache.pinot.spi.data.readers.RecordReader;
 import org.apache.pinot.core.indexsegment.IndexSegment;
 import org.apache.pinot.core.indexsegment.generator.SegmentGeneratorConfig;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegment;
@@ -54,6 +48,13 @@ import org.apache.pinot.core.query.aggregation.function.customobject.QuantileDig
 import org.apache.pinot.core.query.aggregation.groupby.AggregationGroupByResult;
 import org.apache.pinot.core.query.aggregation.groupby.GroupKeyGenerator;
 import org.apache.pinot.core.segment.creator.impl.SegmentIndexCreationDriverImpl;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.data.readers.RecordReader;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -108,8 +109,8 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   private final QuantileDigest[] _quantileDigests = new QuantileDigest[NUM_ROWS];
   private final TDigest[] _tDigests = new TDigest[NUM_ROWS];
 
-  private ImmutableSegment _indexSegment;
-  private List<SegmentDataManager> _segmentDataManagers;
+  private IndexSegment _indexSegment;
+  private List<IndexSegment> _indexSegments;
 
   @Override
   protected String getFilter() {
@@ -122,8 +123,8 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   }
 
   @Override
-  protected List<SegmentDataManager> getSegmentDataManagers() {
-    return _segmentDataManagers;
+  protected List<IndexSegment> getIndexSegments() {
+    return _indexSegments;
   }
 
   @BeforeClass
@@ -132,9 +133,9 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
     FileUtils.deleteQuietly(INDEX_DIR);
 
     buildSegment();
-    _indexSegment = ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), ReadMode.mmap);
-    _segmentDataManagers =
-        Arrays.asList(new ImmutableSegmentDataManager(_indexSegment), new ImmutableSegmentDataManager(_indexSegment));
+    ImmutableSegment immutableSegment = ImmutableSegmentLoader.load(new File(INDEX_DIR, SEGMENT_NAME), ReadMode.mmap);
+    _indexSegment = immutableSegment;
+    _indexSegments = Arrays.asList(immutableSegment, immutableSegment);
   }
 
   private void buildSegment()
@@ -207,13 +208,15 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
         .addMetric(DISTINCT_COUNT_HLL_COLUMN, DataType.BYTES).addMetric(MIN_MAX_RANGE_COLUMN, DataType.BYTES)
         .addMetric(PERCENTILE_EST_COLUMN, DataType.BYTES).addMetric(PERCENTILE_TDIGEST_COLUMN, DataType.BYTES).build();
 
-    SegmentGeneratorConfig config = new SegmentGeneratorConfig(schema);
+    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).build();
+
+    SegmentGeneratorConfig config = new SegmentGeneratorConfig(tableConfig, schema);
     config.setOutDir(INDEX_DIR.getPath());
     config.setTableName(RAW_TABLE_NAME);
     config.setSegmentName(SEGMENT_NAME);
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
-    try (RecordReader recordReader = new GenericRowRecordReader(rows, schema)) {
+    try (RecordReader recordReader = new GenericRowRecordReader(rows)) {
       driver.init(config, recordReader);
       driver.build();
     }
@@ -222,7 +225,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInnerSegmentAggregation()
       throws Exception {
-    AggregationOperator aggregationOperator = getOperatorForQuery(getAggregationQuery());
+    AggregationOperator aggregationOperator = getOperatorForPqlQuery(getAggregationQuery());
     IntermediateResultsBlock resultsBlock = aggregationOperator.nextBlock();
     List<Object> aggregationResult = resultsBlock.getAggregationResult();
     assertNotNull(aggregationResult);
@@ -284,7 +287,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInterSegmentAggregation()
       throws Exception {
-    BrokerResponseNative brokerResponse = getBrokerResponseForQuery(getAggregationQuery());
+    BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(getAggregationQuery());
     List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
     assertNotNull(aggregationResults);
     assertEquals(aggregationResults.size(), 5);
@@ -383,7 +386,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInnerSegmentSVGroupBy()
       throws Exception {
-    AggregationGroupByOperator groupByOperator = getOperatorForQuery(getSVGroupByQuery());
+    AggregationGroupByOperator groupByOperator = getOperatorForPqlQuery(getSVGroupByQuery());
     IntermediateResultsBlock resultsBlock = groupByOperator.nextBlock();
     AggregationGroupByResult groupByResult = resultsBlock.getAggregationGroupByResult();
     assertNotNull(groupByResult);
@@ -450,7 +453,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInterSegmentSVGroupBy()
       throws Exception {
-    BrokerResponseNative brokerResponse = getBrokerResponseForQuery(getSVGroupByQuery());
+    BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(getSVGroupByQuery());
     List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
     assertNotNull(aggregationResults);
     assertEquals(aggregationResults.size(), 5);
@@ -579,7 +582,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInnerSegmentMVGroupBy()
       throws Exception {
-    AggregationGroupByOperator groupByOperator = getOperatorForQuery(getMVGroupByQuery());
+    AggregationGroupByOperator groupByOperator = getOperatorForPqlQuery(getMVGroupByQuery());
     IntermediateResultsBlock resultsBlock = groupByOperator.nextBlock();
     AggregationGroupByResult groupByResult = resultsBlock.getAggregationGroupByResult();
     assertNotNull(groupByResult);
@@ -655,7 +658,7 @@ public class SerializedBytesQueriesTest extends BaseQueriesTest {
   @Test
   public void testInterSegmentMVGroupBy()
       throws Exception {
-    BrokerResponseNative brokerResponse = getBrokerResponseForQuery(getMVGroupByQuery());
+    BrokerResponseNative brokerResponse = getBrokerResponseForPqlQuery(getMVGroupByQuery());
     List<AggregationResult> aggregationResults = brokerResponse.getAggregationResults();
     assertNotNull(aggregationResults);
     assertEquals(aggregationResults.size(), 5);

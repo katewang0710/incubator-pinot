@@ -24,26 +24,31 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableList;
 import java.io.File;
 import java.io.IOException;
-import java.net.URL;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import org.apache.commons.io.FileUtils;
 import org.apache.helix.model.IdealState;
-import org.apache.pinot.common.config.TableConfig;
-import org.apache.pinot.common.config.TableNameBuilder;
+import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.metadata.segment.OfflineSegmentZKMetadata;
 import org.apache.pinot.common.utils.CommonConstants;
-import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.common.utils.ServiceStatus;
 import org.apache.pinot.core.indexsegment.generator.SegmentVersion;
-import org.apache.pinot.pql.parsers.Pql2Compiler;
+import org.apache.pinot.core.startree.v2.AggregationFunctionColumnPair;
+import org.apache.pinot.spi.config.table.IndexingConfig;
+import org.apache.pinot.spi.config.table.QueryConfig;
+import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.util.TestUtils;
-import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -59,19 +64,35 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
   private static final int NUM_SERVERS = 1;
   private static final int NUM_SEGMENTS = 12;
 
+  // For table config refresh test, make an expensive query to ensure the query won't finish in 5ms
+  private static final String TEST_TIMEOUT_QUERY =
+      "SELECT DISTINCTCOUNT(AirlineID) FROM mytable GROUP BY Carrier TOP 10000";
+
   // For inverted index triggering test
   private static final List<String> UPDATED_INVERTED_INDEX_COLUMNS =
       Arrays.asList("FlightNum", "Origin", "Quarter", "DivActualElapsedTime");
   private static final String TEST_UPDATED_INVERTED_INDEX_QUERY =
       "SELECT COUNT(*) FROM mytable WHERE DivActualElapsedTime = 305";
 
+  // For range index triggering test
+  private static final List<String> UPDATED_RANGE_INDEX_COLUMNS = Collections.singletonList("DivActualElapsedTime");
+  private static final String TEST_UPDATED_RANGE_INDEX_QUERY =
+      "SELECT COUNT(*) FROM mytable WHERE DivActualElapsedTime > 305";
+
+  // For bloom filter triggering test
   private static final List<String> UPDATED_BLOOM_FILTER_COLUMNS = Collections.singletonList("Carrier");
   private static final String TEST_UPDATED_BLOOM_FILTER_QUERY = "SELECT COUNT(*) FROM mytable WHERE Carrier = 'CA'";
 
+  // For star-tree triggering test
+  private static final StarTreeIndexConfig STAR_TREE_INDEX_CONFIG =
+      new StarTreeIndexConfig(Collections.singletonList("Carrier"), null,
+          Collections.singletonList(AggregationFunctionColumnPair.COUNT_STAR.toColumnName()), 100);
+  private static final String TEST_STAR_TREE_QUERY = "SELECT COUNT(*) FROM mytable WHERE Carrier = 'UA'";
+
   // For default columns test
-  private static final String SCHEMA_WITH_EXTRA_COLUMNS =
+  private static final String SCHEMA_FILE_NAME_WITH_EXTRA_COLUMNS =
       "On_Time_On_Time_Performance_2014_100k_subset_nonulls_default_column_test_extra_columns.schema";
-  private static final String SCHEMA_WITH_MISSING_COLUMNS =
+  private static final String SCHEMA_FILE_NAME_WITH_MISSING_COLUMNS =
       "On_Time_On_Time_Performance_2014_100k_subset_nonulls_default_column_test_missing_columns.schema";
   private static final String TEST_DEFAULT_COLUMNS_QUERY =
       "SELECT COUNT(*) FROM mytable WHERE NewAddedIntDimension < 0";
@@ -79,6 +100,7 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
 
   private final List<ServiceStatus.ServiceStatusCallback> _serviceStatusCallbacks =
       new ArrayList<>(getNumBrokers() + getNumServers());
+  private String _schemaFileName = DEFAULT_SCHEMA_FILE_NAME;
 
   protected int getNumBrokers() {
     return NUM_BROKERS;
@@ -86,6 +108,17 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
 
   protected int getNumServers() {
     return NUM_SERVERS;
+  }
+
+  @Override
+  protected String getSchemaFileName() {
+    return _schemaFileName;
+  }
+
+  // NOTE: Only allow removing default columns for v1 segment
+  @Override
+  protected String getSegmentVersion() {
+    return SegmentVersion.v1.name();
   }
 
   @BeforeClass
@@ -99,31 +132,24 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     startBrokers(getNumBrokers());
     startServers(getNumServers());
 
+    // Create and upload the schema and table config
+    Schema schema = createSchema();
+    addSchema(schema);
+    TableConfig tableConfig = createOfflineTableConfig();
+    addTableConfig(tableConfig);
+
     // Unpack the Avro files
     List<File> avroFiles = unpackAvroData(_tempDir);
 
-    ExecutorService executor = Executors.newCachedThreadPool();
-
-    // Create segments from Avro data
-    ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(avroFiles, 0, _segmentDir, _tarDir, getTableName(), false, null, getRawIndexColumns(),
-            null, executor);
-
-    // Load data into H2
-    setUpH2Connection(avroFiles, executor);
-
-    // Initialize query generator
-    setUpQueryGenerator(avroFiles, executor);
-
-    executor.shutdown();
-    executor.awaitTermination(10, TimeUnit.MINUTES);
-
-    // Create the table
-    addOfflineTable(getTableName(), null, null, null, null, getLoadMode(), SegmentVersion.v1, getInvertedIndexColumns(),
-        getBloomFilterIndexColumns(), getTaskConfig(), null, null);
-
-    // Upload all segments
+    // Create and upload segments
+    ClusterIntegrationTestUtils.buildSegmentsFromAvro(avroFiles, tableConfig, schema, 0, _segmentDir, _tarDir);
     uploadSegments(getTableName(), _tarDir);
+
+    // Set up the H2 connection
+    setUpH2Connection(avroFiles);
+
+    // Initialize the query generator
+    setUpQueryGenerator(avroFiles);
 
     // Set up service status callbacks
     // NOTE: put this step after creating the table and uploading all segments so that brokers and servers can find the
@@ -171,18 +197,68 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
 
   @Test
   public void testInvalidTableConfig() {
-    TableConfig tableConfig =
-        new TableConfig.Builder(CommonConstants.Helix.TableType.OFFLINE).setTableName("badTable").build();
-    ObjectNode jsonConfig = tableConfig.toJsonConfig();
+    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName("badTable").build();
+    ObjectNode tableConfigJson = (ObjectNode) tableConfig.toJsonNode();
     // Remove a mandatory field
-    jsonConfig.remove(TableConfig.VALIDATION_CONFIG_KEY);
+    tableConfigJson.remove(TableConfig.VALIDATION_CONFIG_KEY);
     try {
-      sendPostRequest(_controllerRequestURLBuilder.forTableCreate(), jsonConfig.toString());
+      sendPostRequest(_controllerRequestURLBuilder.forTableCreate(), tableConfigJson.toString());
       fail();
     } catch (IOException e) {
       // Should get response code 400 (BAD_REQUEST)
       assertTrue(e.getMessage().startsWith("Server returned HTTP response code: 400"));
     }
+  }
+
+  @Test
+  public void testRefreshTableConfigAndQueryTimeout()
+      throws Exception {
+    // Set timeout as 5ms so that query will timeout
+    TableConfig tableConfig = getOfflineTableConfig();
+    tableConfig.setQueryConfig(new QueryConfig(5L));
+    updateTableConfig(tableConfig);
+
+    // Wait for at most 1 minute for broker to receive and process the table config refresh message
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        JsonNode queryResponse = postQuery(TEST_TIMEOUT_QUERY);
+        JsonNode exceptions = queryResponse.get("exceptions");
+        if (exceptions.size() != 0) {
+          // Timed out on broker side
+          return exceptions.get(0).get("errorCode").asInt() == QueryException.BROKER_TIMEOUT_ERROR_CODE;
+        } else {
+          // Timed out on server side
+          int numServersQueried = queryResponse.get("numServersQueried").asInt();
+          int numServersResponded = queryResponse.get("numServersResponded").asInt();
+          int numDocsScanned = queryResponse.get("numDocsScanned").asInt();
+          return numServersQueried == getNumServers() && numServersResponded == 0 && numDocsScanned == 0;
+        }
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }, 60_000L, "Failed to refresh table config");
+
+    // Remove timeout so that query will finish
+    tableConfig.setQueryConfig(null);
+    updateTableConfig(tableConfig);
+
+    // Wait for at most 1 minute for broker to receive and process the table config refresh message
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        JsonNode queryResponse = postQuery(TEST_TIMEOUT_QUERY);
+        JsonNode exceptions = queryResponse.get("exceptions");
+        if (exceptions.size() != 0) {
+          return false;
+        }
+        int numServersQueried = queryResponse.get("numServersQueried").asInt();
+        int numServersResponded = queryResponse.get("numServersResponded").asInt();
+        int numDocsScanned = queryResponse.get("numDocsScanned").asInt();
+        return numServersQueried == getNumServers() && numServersResponded == getNumServers()
+            && numDocsScanned == getCountStarResult();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }, 60_000L, "Failed to refresh table config");
   }
 
   @Test
@@ -216,16 +292,16 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
   @Test
   public void testInvertedIndexTriggering()
       throws Exception {
-    final long numTotalDocs = getCountStarResult();
+    long numTotalDocs = getCountStarResult();
 
     JsonNode queryResponse = postQuery(TEST_UPDATED_INVERTED_INDEX_QUERY);
     assertEquals(queryResponse.get("numEntriesScannedInFilter").asLong(), numTotalDocs);
 
     // Update table config and trigger reload
-    updateOfflineTable(getTableName(), null, null, null, null, getLoadMode(), SegmentVersion.v1,
-        UPDATED_INVERTED_INDEX_COLUMNS, null, getTaskConfig(), null, null);
-
-    sendPostRequest(_controllerBaseApiUrl + "/tables/mytable/segments/reload?type=offline", null);
+    TableConfig tableConfig = getOfflineTableConfig();
+    tableConfig.getIndexingConfig().setInvertedIndexColumns(UPDATED_INVERTED_INDEX_COLUMNS);
+    updateTableConfig(tableConfig);
+    reloadOfflineTable(getTableName());
 
     TestUtils.waitForCondition(aVoid -> {
       try {
@@ -240,17 +316,92 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
   }
 
   @Test
+  public void testTimeFunc()
+      throws Exception {
+    String sqlQuery = "SELECT toDateTime(now(), 'yyyy-MM-dd z') FROM mytable";
+    JsonNode response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    String todayStr = response.get("resultTable").get("rows").get(0).get(0).asText();
+    String expectedTodayStr =
+        Instant.now().atZone(ZoneId.of("UTC")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd z"));
+    assertEquals(todayStr, expectedTodayStr);
+  }
+
+  @Test
+  public void testLiteralOnlyFunc()
+      throws Exception {
+    long currentTsMin = System.currentTimeMillis();
+    String sqlQuery = "SELECT 1, now() as currentTs, 'abc', toDateTime(now(), 'yyyy-MM-dd z') as today, now()";
+    JsonNode response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    long currentTsMax = System.currentTimeMillis();
+
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(0).asText(), "1");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(1).asText(), "currentTs");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(2).asText(), "abc");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnNames").get(3).asText(), "today");
+    String nowColumnName = response.get("resultTable").get("dataSchema").get("columnNames").get(4).asText();
+    assertTrue(Long.parseLong(nowColumnName) > currentTsMin);
+    assertTrue(Long.parseLong(nowColumnName) < currentTsMax);
+
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(0).asText(), "LONG");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(1).asText(), "LONG");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(2).asText(), "STRING");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(3).asText(), "STRING");
+    assertEquals(response.get("resultTable").get("dataSchema").get("columnDataTypes").get(4).asText(), "LONG");
+
+    int first = response.get("resultTable").get("rows").get(0).get(0).asInt();
+    long second = response.get("resultTable").get("rows").get(0).get(1).asLong();
+    String third = response.get("resultTable").get("rows").get(0).get(2).asText();
+    assertEquals(first, 1);
+    assertTrue(second > currentTsMin);
+    assertTrue(second < currentTsMax);
+    assertEquals(third, "abc");
+    String todayStr = response.get("resultTable").get("rows").get(0).get(3).asText();
+    String expectedTodayStr =
+        Instant.now().atZone(ZoneId.of("UTC")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd z"));
+    assertEquals(todayStr, expectedTodayStr);
+    long nowValue = response.get("resultTable").get("rows").get(0).get(4).asLong();
+    assertEquals(nowValue, Long.parseLong(nowColumnName));
+  }
+
+  @Test
+  public void testRangeIndexTriggering()
+      throws Exception {
+    long numTotalDocs = getCountStarResult();
+
+    JsonNode queryResponse = postQuery(TEST_UPDATED_RANGE_INDEX_QUERY);
+    assertEquals(queryResponse.get("numEntriesScannedInFilter").asLong(), numTotalDocs);
+
+    // Update table config and trigger reload
+    TableConfig tableConfig = getOfflineTableConfig();
+    tableConfig.getIndexingConfig().setRangeIndexColumns(UPDATED_RANGE_INDEX_COLUMNS);
+    updateTableConfig(tableConfig);
+    reloadOfflineTable(getTableName());
+
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        JsonNode queryResponse1 = postQuery(TEST_UPDATED_RANGE_INDEX_QUERY);
+        // Total docs should not change during reload
+        assertEquals(queryResponse1.get("totalDocs").asLong(), numTotalDocs);
+        return queryResponse1.get("numEntriesScannedInFilter").asLong() < numTotalDocs;
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }, 600_000L, "Failed to generate range index");
+  }
+
+  @Test
   public void testBloomFilterTriggering()
       throws Exception {
-    final long numTotalDocs = getCountStarResult();
+    long numTotalDocs = getCountStarResult();
+
     JsonNode queryResponse = postQuery(TEST_UPDATED_BLOOM_FILTER_QUERY);
     assertEquals(queryResponse.get("numSegmentsProcessed").asLong(), NUM_SEGMENTS);
 
     // Update table config and trigger reload
-    updateOfflineTable(getTableName(), null, null, null, null, getLoadMode(), SegmentVersion.v1, null,
-        UPDATED_BLOOM_FILTER_COLUMNS, getTaskConfig(), null, null);
-
-    sendPostRequest(_controllerBaseApiUrl + "/tables/mytable/segments/reload?type=offline", null);
+    TableConfig tableConfig = getOfflineTableConfig();
+    tableConfig.getIndexingConfig().setBloomFilterColumns(UPDATED_BLOOM_FILTER_COLUMNS);
+    updateTableConfig(tableConfig);
+    reloadOfflineTable(getTableName());
 
     TestUtils.waitForCondition(aVoid -> {
       try {
@@ -261,7 +412,47 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
-    }, 600_000L, "Failed to generate inverted index");
+    }, 600_000L, "Failed to generate bloom filter");
+  }
+
+  @Test
+  public void testStarTreeTriggering()
+      throws Exception {
+    long numTotalDocs = getCountStarResult();
+
+    JsonNode queryResponse = postQuery(TEST_STAR_TREE_QUERY);
+    int result = queryResponse.get("aggregationResults").get(0).get("value").asInt();
+    // Initially 'numDocsScanned' should be the same as 'COUNT(*)' result
+    assertEquals(queryResponse.get("numDocsScanned").asInt(), result);
+
+    // Update table config and trigger reload
+    TableConfig tableConfig = getOfflineTableConfig();
+    IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
+    indexingConfig.setStarTreeIndexConfigs(Collections.singletonList(STAR_TREE_INDEX_CONFIG));
+    indexingConfig.setEnableDynamicStarTreeCreation(true);
+    updateTableConfig(tableConfig);
+    reloadOfflineTable(getTableName());
+
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        JsonNode queryResponse1 = postQuery(TEST_STAR_TREE_QUERY);
+        // Result should not change during reload
+        assertEquals(queryResponse1.get("aggregationResults").get(0).get("value").asInt(), result);
+        // Total docs should not change during reload
+        assertEquals(queryResponse1.get("totalDocs").asLong(), numTotalDocs);
+        // With star-tree, 'numDocsScanned' should be the same as number of segments (1 per segment)
+        return queryResponse1.get("numDocsScanned").asInt() == NUM_SEGMENTS;
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }, 600_000L, "Failed to generate bloom filter");
+
+    // Reload again should have no effect
+    reloadOfflineTable(getTableName());
+    JsonNode queryResponse1 = postQuery(TEST_STAR_TREE_QUERY);
+    assertEquals(queryResponse1.get("aggregationResults").get(0).get("value").asInt(), result);
+    assertEquals(queryResponse1.get("totalDocs").asLong(), numTotalDocs);
+    assertEquals(queryResponse1.get("numDocsScanned").asInt(), NUM_SEGMENTS);
   }
 
   /**
@@ -298,18 +489,20 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     assertEquals(queryResponse.get("selectionResults").get("columns").size(), 79);
   }
 
-  private void reloadDefaultColumns(final boolean withExtraColumns)
+  private void reloadDefaultColumns(boolean withExtraColumns)
       throws Exception {
-    final long numTotalDocs = getCountStarResult();
+    long numTotalDocs = getCountStarResult();
 
     if (withExtraColumns) {
-      sendSchema(SCHEMA_WITH_EXTRA_COLUMNS);
+      _schemaFileName = SCHEMA_FILE_NAME_WITH_EXTRA_COLUMNS;
+      addSchema(createSchema());
     } else {
-      sendSchema(SCHEMA_WITH_MISSING_COLUMNS);
+      _schemaFileName = SCHEMA_FILE_NAME_WITH_MISSING_COLUMNS;
+      addSchema(createSchema());
     }
 
     // Trigger reload
-    sendPostRequest(_controllerBaseApiUrl + "/tables/mytable/segments/reload?type=offline", null);
+    reloadOfflineTable(getTableName());
 
     String errorMessage;
     if (withExtraColumns) {
@@ -333,14 +526,6 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
         throw new RuntimeException(e);
       }
     }, 600_000L, errorMessage);
-  }
-
-  private void sendSchema(String resourceName)
-      throws Exception {
-    URL resource = OfflineClusterIntegrationTest.class.getClassLoader().getResource(resourceName);
-    assertNotNull(resource);
-    File schemaFile = new File(resource.getFile());
-    addSchema(schemaFile, getTableName());
   }
 
   private void testNewAddedColumns()
@@ -507,6 +692,28 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     assertEquals(groupByEntry.get("group").get(0).asDouble(), 16138.0 / 2);
     assertEquals(groupByResult.get("groupByColumns").get(0).asText(), "div(DaysSinceEpoch,'2')");
 
+    pqlQuery = "SELECT COUNT(*) FROM mytable GROUP BY arrayLength(DivAirports)";
+    response = postQuery(pqlQuery);
+    groupByResult = response.get("aggregationResults").get(0);
+    groupByEntry = groupByResult.get("groupByResult").get(0);
+    assertEquals(groupByEntry.get("value").asDouble(), 115545.0);
+    assertEquals(groupByEntry.get("group").get(0).asText(), "5");
+    assertEquals(groupByResult.get("groupByColumns").get(0).asText(), "arraylength(DivAirports)");
+
+    pqlQuery = "SELECT COUNT(*) FROM mytable GROUP BY arrayLength(valueIn(DivAirports,'DFW','ORD'))";
+    response = postQuery(pqlQuery);
+    groupByResult = response.get("aggregationResults").get(0);
+    groupByEntry = groupByResult.get("groupByResult").get(0);
+    assertEquals(groupByEntry.get("value").asDouble(), 114895.0);
+    assertEquals(groupByEntry.get("group").get(0).asText(), "0");
+    groupByEntry = groupByResult.get("groupByResult").get(1);
+    assertEquals(groupByEntry.get("value").asDouble(), 648.0);
+    assertEquals(groupByEntry.get("group").get(0).asText(), "1");
+    groupByEntry = groupByResult.get("groupByResult").get(2);
+    assertEquals(groupByEntry.get("value").asDouble(), 2.0);
+    assertEquals(groupByEntry.get("group").get(0).asText(), "2");
+    assertEquals(groupByResult.get("groupByColumns").get(0).asText(), "arraylength(valuein(DivAirports,'DFW','ORD'))");
+
     pqlQuery = "SELECT COUNT(*) FROM mytable GROUP BY valueIn(DivAirports,'DFW','ORD')";
     response = postQuery(pqlQuery);
     groupByResult = response.get("aggregationResults").get(0);
@@ -551,26 +758,26 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     String pqlQuery = "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable";
     JsonNode response = postQuery(pqlQuery);
     ArrayNode selectionResults = (ArrayNode) response.get("selectionResults").get("results");
-    Assert.assertNotNull(selectionResults);
-    Assert.assertTrue(selectionResults.size() > 0);
+    assertNotNull(selectionResults);
+    assertTrue(selectionResults.size() > 0);
     for (int i = 0; i < selectionResults.size(); i++) {
       long daysSinceEpoch = selectionResults.get(i).get(0).asLong();
       long secondsSinceEpoch = selectionResults.get(i).get(1).asLong();
-      Assert.assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
+      assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
     }
 
     pqlQuery =
         "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable order by DaysSinceEpoch limit 10000";
     response = postQuery(pqlQuery);
     selectionResults = (ArrayNode) response.get("selectionResults").get("results");
-    Assert.assertNotNull(selectionResults);
-    Assert.assertTrue(selectionResults.size() > 0);
+    assertNotNull(selectionResults);
+    assertTrue(selectionResults.size() > 0);
     long prevValue = -1;
     for (int i = 0; i < selectionResults.size(); i++) {
       long daysSinceEpoch = selectionResults.get(i).get(0).asLong();
       long secondsSinceEpoch = selectionResults.get(i).get(1).asLong();
-      Assert.assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
-      Assert.assertTrue(daysSinceEpoch >= prevValue);
+      assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
+      assertTrue(daysSinceEpoch >= prevValue);
       prevValue = daysSinceEpoch;
     }
 
@@ -578,14 +785,14 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
         "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable order by timeConvert(DaysSinceEpoch,'DAYS','SECONDS') DESC limit 10000";
     response = postQuery(pqlQuery);
     selectionResults = (ArrayNode) response.get("selectionResults").get("results");
-    Assert.assertNotNull(selectionResults);
-    Assert.assertTrue(selectionResults.size() > 0);
+    assertNotNull(selectionResults);
+    assertTrue(selectionResults.size() > 0);
     prevValue = Long.MAX_VALUE;
     for (int i = 0; i < selectionResults.size(); i++) {
       long daysSinceEpoch = selectionResults.get(i).get(0).asLong();
       long secondsSinceEpoch = selectionResults.get(i).get(1).asLong();
-      Assert.assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
-      Assert.assertTrue(secondsSinceEpoch <= prevValue);
+      assertEquals(daysSinceEpoch * 24 * 60 * 60, secondsSinceEpoch);
+      assertTrue(secondsSinceEpoch <= prevValue);
       prevValue = secondsSinceEpoch;
     }
   }
@@ -598,32 +805,106 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
 
     String pqlQuery;
     pqlQuery = "SELECT count(*) FROM mytable WHERE DaysSinceEpoch = " + daysSinceEpoch;
-    JsonNode response1 = postQuery(pqlQuery);
+    long expectedResult = postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong();
 
     pqlQuery = "SELECT count(*) FROM mytable WHERE timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + secondsSinceEpoch;
-    JsonNode response2 = postQuery(pqlQuery);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
 
     pqlQuery = "SELECT count(*) FROM mytable WHERE DaysSinceEpoch = " + daysSinceEpoch
         + " OR timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + secondsSinceEpoch;
-    JsonNode response3 = postQuery(pqlQuery);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
 
     pqlQuery = "SELECT count(*) FROM mytable WHERE DaysSinceEpoch = " + daysSinceEpoch
         + " AND timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + secondsSinceEpoch;
-    JsonNode response4 = postQuery(pqlQuery);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
 
     pqlQuery =
         "SELECT count(*) FROM mytable WHERE DIV(timeConvert(DaysSinceEpoch,'DAYS','SECONDS'),1) = " + secondsSinceEpoch;
-    JsonNode response5 = postQuery(pqlQuery);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
 
-    double val1 = response1.get("aggregationResults").get(0).get("value").asDouble();
-    double val2 = response2.get("aggregationResults").get(0).get("value").asDouble();
-    double val3 = response3.get("aggregationResults").get(0).get("value").asDouble();
-    double val4 = response4.get("aggregationResults").get(0).get("value").asDouble();
-    double val5 = response5.get("aggregationResults").get(0).get("value").asDouble();
-    Assert.assertEquals(val1, val2);
-    Assert.assertEquals(val1, val3);
-    Assert.assertEquals(val1, val4);
-    Assert.assertEquals(val1, val5);
+    pqlQuery = String
+        .format("SELECT count(*) FROM mytable WHERE timeConvert(DaysSinceEpoch,'DAYS','SECONDS') IN (%d, %d)",
+            secondsSinceEpoch - 100, secondsSinceEpoch);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
+
+    pqlQuery = String
+        .format("SELECT count(*) FROM mytable WHERE timeConvert(DaysSinceEpoch,'DAYS','SECONDS') BETWEEN %d AND %d",
+            secondsSinceEpoch - 100, secondsSinceEpoch);
+    assertEquals(postQuery(pqlQuery).get("aggregationResults").get(0).get("value").asLong(), expectedResult);
+  }
+
+  @Test
+  public void testCaseStatementInSelection()
+      throws Exception {
+    List<String> origins = Arrays
+        .asList("ATL", "ORD", "DFW", "DEN", "LAX", "IAH", "SFO", "PHX", "LAS", "EWR", "MCO", "BOS", "SLC", "SEA", "MSP",
+            "CLT", "LGA", "DTW", "JFK", "BWI");
+    StringBuilder caseStatementBuilder = new StringBuilder("CASE ");
+    for (int i = 0; i < origins.size(); i++) {
+      // WHEN origin = 'ATL' THEN 1
+      // WHEN origin = 'ORD' THEN 2
+      // WHEN origin = 'DFW' THEN 3
+      // ....
+      caseStatementBuilder.append(String.format("WHEN origin = '%s' THEN %d ", origins.get(i), i + 1));
+    }
+    caseStatementBuilder.append("ELSE 0 END");
+    String sqlQuery = "SELECT origin, " + caseStatementBuilder + " AS origin_code FROM mytable LIMIT 1000";
+    JsonNode response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode rows = response.get("resultTable").get("rows");
+    assertEquals(response.get("exceptions").size(), 0);
+    for (int i = 0; i < rows.size(); i++) {
+      String origin = rows.get(i).get(0).asText();
+      int originCode = rows.get(i).get(1).asInt();
+      if (originCode > 0) {
+        assertEquals(origin, origins.get(originCode - 1));
+      } else {
+        assertFalse(origins.contains(origin));
+      }
+    }
+  }
+
+  @Test
+  public void testCaseStatementInSelectionWithTransformFunctionInThen()
+      throws Exception {
+    String sqlQuery =
+        "SELECT ArrDelay, CASE WHEN ArrDelay > 0 THEN ArrDelay WHEN ArrDelay < 0 THEN ArrDelay * -1 ELSE 0 END AS ArrTimeDiff FROM mytable LIMIT 1000";
+    JsonNode response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    JsonNode rows = response.get("resultTable").get("rows");
+    assertEquals(response.get("exceptions").size(), 0);
+    for (int i = 0; i < rows.size(); i++) {
+      int arrDelay = rows.get(i).get(0).asInt();
+      int arrDelayDiff = rows.get(i).get(1).asInt();
+      if (arrDelay > 0) {
+        assertEquals(arrDelay, arrDelayDiff);
+      } else {
+        assertEquals(arrDelay, arrDelayDiff * -1);
+      }
+    }
+  }
+
+  @Test
+  public void testCaseStatementWithInAggregation()
+      throws Exception {
+    testCountVsCaseQuery("origin = 'ATL'");
+    testCountVsCaseQuery("origin <> 'ATL'");
+
+    testCountVsCaseQuery("DaysSinceEpoch > 16312");
+    testCountVsCaseQuery("DaysSinceEpoch >= 16312");
+    testCountVsCaseQuery("DaysSinceEpoch < 16312");
+    testCountVsCaseQuery("DaysSinceEpoch <= 16312");
+    testCountVsCaseQuery("DaysSinceEpoch = 16312");
+    testCountVsCaseQuery("DaysSinceEpoch <> 16312");
+  }
+
+  private void testCountVsCaseQuery(String predicate)
+      throws Exception {
+    String sqlQuery = String.format("SELECT COUNT(*) FROM mytable WHERE %s", predicate);
+    JsonNode response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    long countValue = response.get("resultTable").get("rows").get(0).get(0).asLong();
+    sqlQuery = String.format("SELECT SUM(CASE WHEN %s THEN 1 ELSE 0 END) as sum1 FROM mytable", predicate);
+    response = postSqlQuery(sqlQuery, _brokerBaseApiUrl);
+    long caseSum = response.get("resultTable").get("rows").get(0).get(0).asLong();
+    assertEquals(caseSum, countValue);
   }
 
   @Test
@@ -639,14 +920,12 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
       pqlQuery =
           "SELECT count(*) FROM mytable WHERE Origin = \"" + origin + "\" AND DaysSinceEpoch = " + daysSinceEpoch;
       JsonNode response1 = postQuery(pqlQuery);
-      //System.out.println(response1);
       pqlQuery = "SELECT count(*) FROM mytable WHERE Origin = \"" + origin
           + "\" AND timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + secondsSinceEpoch;
       JsonNode response2 = postQuery(pqlQuery);
-      //System.out.println(response2);
       double val1 = response1.get("aggregationResults").get(0).get("value").asDouble();
       double val2 = response2.get("aggregationResults").get(0).get("value").asDouble();
-      Assert.assertEquals(val1, val2);
+      assertEquals(val1, val2);
     }
   }
 
@@ -690,6 +969,22 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     testQuery(query, Collections.singletonList(query));
   }
 
+  @Test
+  public void testQueryWithSameAlias()
+      throws Exception {
+    //test repeated columns in selection query
+    String query = "SELECT ArrTime AS ArrTime, Carrier AS Carrier, DaysSinceEpoch AS DaysSinceEpoch FROM mytable ORDER BY DaysSinceEpoch DESC";
+    testQuery(query, Collections.singletonList(query));
+
+    //test repeated columns in selection query
+    query = "SELECT ArrTime AS ArrTime, DaysSinceEpoch AS DaysSinceEpoch, Carrier AS Carrier FROM mytable ORDER BY Carrier DESC";
+    testQuery(query, Collections.singletonList(query));
+
+    //test repeated columns in selection query
+    query = "SELECT ArrTime AS ArrTime, DaysSinceEpoch AS DaysSinceEpoch, Carrier AS Carrier FROM mytable ORDER BY Carrier DESC, ArrTime DESC";
+    testQuery(query, Collections.singletonList(query));
+  }
+
   @AfterClass
   public void tearDown()
       throws Exception {
@@ -712,7 +1007,7 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     assertEquals(numInstances, getNumBrokers() + getNumServers() + 1);
 
     // Try to delete a server that does not exist
-    String deleteInstanceRequest = _controllerRequestURLBuilder.forInstanceDelete("potato");
+    String deleteInstanceRequest = _controllerRequestURLBuilder.forInstance("potato");
     try {
       sendDeleteRequest(deleteInstanceRequest);
       fail("Delete should have returned a failure status (404)");
@@ -733,7 +1028,7 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
     }
 
     // Try to delete a live server
-    deleteInstanceRequest = _controllerRequestURLBuilder.forInstanceDelete(serverName);
+    deleteInstanceRequest = _controllerRequestURLBuilder.forInstance(serverName);
     try {
       sendDeleteRequest(deleteInstanceRequest);
       fail("Delete should have returned a failure status (409)");
@@ -761,7 +1056,7 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
 
     // Try to delete a broker whose information is still live
     try {
-      deleteInstanceRequest = _controllerRequestURLBuilder.forInstanceDelete(brokerName);
+      deleteInstanceRequest = _controllerRequestURLBuilder.forInstance(brokerName);
       sendDeleteRequest(deleteInstanceRequest);
       fail("Delete should have returned a failure status (409)");
     } catch (IOException e) {
@@ -791,22 +1086,135 @@ public class OfflineClusterIntegrationTest extends BaseClusterIntegrationTestSet
   @Test
   public void testDistinctQuery()
       throws Exception {
-    Pql2Compiler.ENABLE_DISTINCT = true;
     // by default 10 rows will be returned, so use high limit
     String pql = "SELECT DISTINCT(Carrier) FROM mytable LIMIT 1000000";
     String sql = "SELECT DISTINCT Carrier FROM mytable";
     testQuery(pql, Collections.singletonList(sql));
+    pql = "SELECT DISTINCT Carrier FROM mytable LIMIT 1000000";
+    testSqlQuery(pql, Collections.singletonList(sql));
 
     pql = "SELECT DISTINCT(Carrier, DestAirportID) FROM mytable LIMIT 1000000";
     sql = "SELECT DISTINCT Carrier, DestAirportID FROM mytable";
     testQuery(pql, Collections.singletonList(sql));
+    pql = "SELECT DISTINCT Carrier, DestAirportID FROM mytable LIMIT 1000000";
+    testSqlQuery(pql, Collections.singletonList(sql));
 
     pql = "SELECT DISTINCT(Carrier, DestAirportID, DestStateName) FROM mytable LIMIT 1000000";
     sql = "SELECT DISTINCT Carrier, DestAirportID, DestStateName FROM mytable";
     testQuery(pql, Collections.singletonList(sql));
+    pql = "SELECT DISTINCT Carrier, DestAirportID, DestStateName FROM mytable LIMIT 1000000";
+    testSqlQuery(pql, Collections.singletonList(sql));
 
     pql = "SELECT DISTINCT(Carrier, DestAirportID, DestCityName) FROM mytable LIMIT 1000000";
     sql = "SELECT DISTINCT Carrier, DestAirportID, DestCityName FROM mytable";
     testQuery(pql, Collections.singletonList(sql));
+    pql = "SELECT DISTINCT Carrier, DestAirportID, DestCityName FROM mytable LIMIT 1000000";
+    testSqlQuery(pql, Collections.singletonList(sql));
+  }
+
+  @Test
+  public void testNonAggregationGroupByQuery()
+      throws Exception {
+    // by default 10 rows will be returned, so use high limit
+    String pql = "SELECT Carrier FROM mytable GROUP BY Carrier LIMIT 1000000";
+    String sql = "SELECT Carrier FROM mytable GROUP BY Carrier";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT Carrier, DestAirportID FROM mytable GROUP BY Carrier, DestAirportID LIMIT 1000000";
+    sql = "SELECT Carrier, DestAirportID FROM mytable GROUP BY Carrier, DestAirportID";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT Carrier, DestAirportID, DestStateName FROM mytable GROUP BY Carrier, DestAirportID, DestStateName LIMIT 1000000";
+    sql = "SELECT Carrier, DestAirportID, DestStateName FROM mytable GROUP BY Carrier, DestAirportID, DestStateName";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT Carrier, DestAirportID, DestCityName FROM mytable GROUP BY Carrier, DestAirportID, DestCityName LIMIT 1000000";
+    sql = "SELECT Carrier, DestAirportID, DestCityName FROM mytable GROUP BY Carrier, DestAirportID, DestCityName";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT ArrTime-DepTime FROM mytable GROUP BY ArrTime, DepTime LIMIT 1000000";
+    sql = "SELECT ArrTime-DepTime FROM mytable GROUP BY ArrTime, DepTime";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT ArrTime-DepTime,ArrTime/3,DepTime*2 FROM mytable GROUP BY ArrTime, DepTime LIMIT 1000000";
+    sql = "SELECT ArrTime-DepTime,ArrTime/3,DepTime*2 FROM mytable GROUP BY ArrTime, DepTime";
+    testSqlQuery(pql, Collections.singletonList(sql));
+
+    pql = "SELECT ArrTime+DepTime FROM mytable GROUP BY ArrTime + DepTime LIMIT 1000000";
+    sql = "SELECT ArrTime+DepTime FROM mytable GROUP BY ArrTime + DepTime";
+    testSqlQuery(pql, Collections.singletonList(sql));
+  }
+
+  @Test
+  public void testCaseInsensitivity() {
+    int daysSinceEpoch = 16138;
+    long secondsSinceEpoch = 16138 * 24 * 60 * 60;
+    List<String> baseQueries = Arrays.asList("SELECT * FROM mytable",
+        "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable",
+        "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable order by DaysSinceEpoch limit 10000",
+        "SELECT DaysSinceEpoch, timeConvert(DaysSinceEpoch,'DAYS','SECONDS') FROM mytable order by timeConvert(DaysSinceEpoch,'DAYS','SECONDS') DESC limit 10000",
+        "SELECT count(*) FROM mytable WHERE DaysSinceEpoch = " + daysSinceEpoch,
+        "SELECT count(*) FROM mytable WHERE timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + secondsSinceEpoch,
+        "SELECT count(*) FROM mytable WHERE timeConvert(DaysSinceEpoch,'DAYS','SECONDS') = " + daysSinceEpoch,
+        "SELECT MAX(timeConvert(DaysSinceEpoch,'DAYS','SECONDS')) FROM mytable",
+        "SELECT COUNT(*) FROM mytable GROUP BY dateTimeConvert(DaysSinceEpoch,'1:DAYS:EPOCH','1:HOURS:EPOCH','1:HOURS')");
+    List<String> queries = new ArrayList<>();
+    baseQueries.stream().forEach(q -> queries.add(q.replace("mytable", "MYTABLE").replace("DaysSinceEpoch", "DAYSSinceEpOch")));
+    baseQueries.stream().forEach(q -> queries.add(q.replace("mytable", "MYDB.MYTABLE").replace("DaysSinceEpoch", "DAYSSinceEpOch")));
+
+    // Wait for at most 10 seconds for broker to get the ZK callback of the schema change
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        for (String query : queries) {
+          JsonNode response = postQuery(query);
+          // NOTE: When table does not exist, we will get 'BrokerResourceMissingError'.
+          //       When column does not exist, all segments will be pruned and 'numSegmentsProcessed' will be 0.
+          return response.get("exceptions").size() == 0 && response.get("numSegmentsProcessed").asInt() > 0;
+        }
+      } catch (Exception e) {
+        // Fail the test when exception caught
+        throw new RuntimeException(e);
+      }
+      return true;
+    }, 10_000L, "Failed to get results for case-insensitive queries");
+  }
+
+  @Test
+  public void testQuerySourceWithDatabaseName()
+      throws Exception {
+    // by default 10 rows will be returned, so use high limit
+    String pql = "SELECT DISTINCT(Carrier) FROM mytable LIMIT 1000000";
+    String sql = "SELECT DISTINCT Carrier FROM mytable";
+    testQuery(pql, Collections.singletonList(sql));
+    pql = "SELECT DISTINCT Carrier FROM db.mytable LIMIT 1000000";
+    testSqlQuery(pql, Collections.singletonList(sql));
+  }
+
+  @Test
+  public void testDistinctCountHll()
+      throws Exception {
+    String query;
+
+    // The Accurate value is 6538.
+    query = "SELECT distinctCount(FlightNum) FROM mytable ";
+    assertEquals(postQuery(query).get("aggregationResults").get(0).get("value").asLong(), 6538);
+    assertEquals(postSqlQuery(query, _brokerBaseApiUrl).get("resultTable").get("rows").get(0).get(0).asLong(), 6538);
+
+    // Expected distinctCountHll with different log2m value from 2 to 19. The Accurate value is 6538.
+    long[] expectedResults =
+        new long[]{3504, 6347, 8877, 9729, 9046, 7672, 7538, 6993, 6649, 6651, 6553, 6525, 6459, 6523, 6532, 6544, 6538, 6539};
+
+    for (int i = 2; i < 20; i++) {
+      query = String.format("SELECT distinctCountHLL(FlightNum, %d) FROM mytable ", i);
+      assertEquals(postQuery(query).get("aggregationResults").get(0).get("value").asLong(), expectedResults[i - 2]);
+      assertEquals(postSqlQuery(query, _brokerBaseApiUrl).get("resultTable").get("rows").get(0).get(0).asLong(),
+          expectedResults[i - 2]);
+    }
+
+    // Default HLL is set as log2m=12
+    query = "SELECT distinctCountHLL(FlightNum) FROM mytable ";
+    assertEquals(postQuery(query).get("aggregationResults").get(0).get("value").asLong(), expectedResults[10]);
+    assertEquals(postSqlQuery(query, _brokerBaseApiUrl).get("resultTable").get("rows").get(0).get(0).asLong(),
+        expectedResults[10]);
   }
 }

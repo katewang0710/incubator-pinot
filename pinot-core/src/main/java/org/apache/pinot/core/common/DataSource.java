@@ -18,38 +18,64 @@
  */
 package org.apache.pinot.core.common;
 
-import org.apache.pinot.core.operator.BaseOperator;
+import javax.annotation.Nullable;
 import org.apache.pinot.core.segment.index.readers.BloomFilterReader;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
 import org.apache.pinot.core.segment.index.readers.InvertedIndexReader;
 import org.apache.pinot.core.segment.index.readers.NullValueVectorReader;
 
 
-public abstract class DataSource extends BaseOperator {
+/**
+ * The {@code DataSource} contains all the indexes and metadata for a column for query execution purpose.
+ */
+public interface DataSource {
 
   /**
-   * Returns the metadata for the data source.
+   * Returns the metadata for the column.
    */
-  public abstract DataSourceMetadata getDataSourceMetadata();
+  DataSourceMetadata getDataSourceMetadata();
 
   /**
-   * Returns the dictionary for the data source if the data is dictionary-encoded, or {@code null} if not.
+   * Returns the forward index for the column. The forward index can be either dictionary-encoded or raw.
    */
-  public abstract Dictionary getDictionary();
+  ForwardIndexReader<?> getForwardIndex();
 
   /**
-   * Returns the inverted index for the data source if exists, or {@code null} if not.
+   * Returns the dictionary for the column if it is dictionary-encoded, or {@code null} if not.
    */
-  public abstract InvertedIndexReader getInvertedIndex();
+  @Nullable
+  Dictionary getDictionary();
 
   /**
-   * Returns the bloom filter for the data source if exists, or {@code null} if not.
+   * Returns the inverted index for the column if exists, or {@code null} if not.
    */
-  public abstract BloomFilterReader getBloomFilter();
+  @Nullable
+  InvertedIndexReader<?> getInvertedIndex();
 
   /**
-   * Returns null value vector for the data source if exists, or {@code null} if not.
+   * Returns the range index for the column if exists, or {@code null} if not.
+   * <p>TODO: Have a separate interface for range index.
    */
-  public abstract NullValueVectorReader getNullValueVector();
+  @Nullable
+  InvertedIndexReader<?> getRangeIndex();
 
+  /**
+   * Returns the text index for the column if exists, or {@code null} if not.
+   * <p>TODO: Have a separate interface for text index.
+   */
+  @Nullable
+  InvertedIndexReader<?> getTextIndex();
+
+  /**
+   * Returns the bloom filter for the column if exists, or {@code null} if not.
+   */
+  @Nullable
+  BloomFilterReader getBloomFilter();
+
+  /**
+   * Returns null value vector for the column if exists, or {@code null} if not.
+   */
+  @Nullable
+  NullValueVectorReader getNullValueVector();
 }

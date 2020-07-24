@@ -18,237 +18,161 @@
  */
 package org.apache.pinot.core.operator.dociditerators;
 
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.core.common.BlockMetadata;
-import org.apache.pinot.core.common.BlockSingleValIterator;
-import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.common.Constants;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.roaringbitmap.IntIterator;
+import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
 import org.roaringbitmap.buffer.MutableRoaringBitmap;
 
 
-public class SVScanDocIdIterator implements ScanBasedDocIdIterator {
-  private int _currentDocId = -1;
-  private final BlockSingleValIterator _valueIterator;
-  private int _startDocId;
-  private int _endDocId;
-  private PredicateEvaluator _evaluator;
-  private String _operatorName;
-  private int _numEntriesScanned = 0;
+/**
+ * The {@code SVScanDocIdIterator} is the scan-based iterator for SVScanDocIdSet to scan a single-value column for the
+ * matching document ids.
+ */
+@SuppressWarnings({"rawtypes", "unchecked"})
+public final class SVScanDocIdIterator implements ScanBasedDocIdIterator {
+  private final PredicateEvaluator _predicateEvaluator;
+  private final ForwardIndexReader _reader;
+  // TODO: Figure out a way to close the reader context
+  //       ChunkReaderContext should be closed explicitly to release the off-heap buffer
+  private final ForwardIndexReaderContext _readerContext;
+  private final int _numDocs;
   private final ValueMatcher _valueMatcher;
 
-  public SVScanDocIdIterator(String operatorName, BlockValSet blockValSet, BlockMetadata blockMetadata,
-      PredicateEvaluator evaluator) {
-    _operatorName = operatorName;
-    _evaluator = evaluator;
-    _valueIterator = (BlockSingleValIterator) blockValSet.iterator();
+  private int _nextDocId = 0;
+  private long _numEntriesScanned = 0L;
 
-    if (evaluator.isAlwaysFalse()) {
-      _currentDocId = Constants.EOF;
-      setStartDocId(Constants.EOF);
-      setEndDocId(Constants.EOF);
-    } else {
-      setStartDocId(blockMetadata.getStartDocId());
-      setEndDocId(blockMetadata.getEndDocId());
-    }
-
-    if (evaluator.isDictionaryBased()) {
-      _valueMatcher = new IntMatcher(); // Match using dictionary id's that are integers.
-    } else {
-      _valueMatcher = getValueMatcherForType(blockMetadata.getDataType());
-    }
-    _valueMatcher.setEvaluator(evaluator);
-  }
-
-  /**
-   * After setting the startDocId, next calls will always return from &gt;=startDocId
-   *
-   * @param startDocId Start doc id
-   */
-  public void setStartDocId(int startDocId) {
-    _currentDocId = startDocId - 1;
-    _valueIterator.skipTo(startDocId);
-    _startDocId = startDocId;
-  }
-
-  /**
-   * After setting the endDocId, next call will return Constants.EOF after currentDocId exceeds
-   * endDocId
-   *
-   * @param endDocId End doc id
-   */
-  public void setEndDocId(int endDocId) {
-    _endDocId = endDocId;
-  }
-
-  @Override
-  public boolean isMatch(int docId) {
-    if (_currentDocId == Constants.EOF) {
-      return false;
-    }
-    _valueIterator.skipTo(docId);
-    _numEntriesScanned++;
-    return _valueMatcher.doesCurrentEntryMatch(_valueIterator);
-  }
-
-  @Override
-  public int advance(int targetDocId) {
-    if (_currentDocId == Constants.EOF) {
-      return _currentDocId;
-    }
-    if (targetDocId < _startDocId) {
-      targetDocId = _startDocId;
-    } else if (targetDocId > _endDocId) {
-      _currentDocId = Constants.EOF;
-    }
-    if (_currentDocId >= targetDocId) {
-      return _currentDocId;
-    } else {
-      _currentDocId = targetDocId - 1;
-      _valueIterator.skipTo(targetDocId);
-      return next();
-    }
+  public SVScanDocIdIterator(PredicateEvaluator predicateEvaluator, ForwardIndexReader reader, int numDocs) {
+    _predicateEvaluator = predicateEvaluator;
+    _reader = reader;
+    _readerContext = reader.createContext();
+    _numDocs = numDocs;
+    _valueMatcher = getValueMatcher();
   }
 
   @Override
   public int next() {
-    if (_currentDocId == Constants.EOF) {
-      return Constants.EOF;
-    }
-    while (_valueIterator.hasNext() && _currentDocId < _endDocId) {
-      _currentDocId = _currentDocId + 1;
+    while (_nextDocId < _numDocs) {
+      int nextDocId = _nextDocId++;
       _numEntriesScanned++;
-      if (_valueMatcher.doesCurrentEntryMatch(_valueIterator)) {
-        return _currentDocId;
+      if (_valueMatcher.doesValueMatch(nextDocId)) {
+        return nextDocId;
       }
     }
-    _currentDocId = Constants.EOF;
     return Constants.EOF;
   }
 
   @Override
-  public int currentDocId() {
-    return _currentDocId;
+  public int advance(int targetDocId) {
+    _nextDocId = targetDocId;
+    return next();
   }
 
   @Override
-  public String toString() {
-    return SVScanDocIdIterator.class.getSimpleName() + "[" + _operatorName + "]";
-  }
-
-  @Override
-  public MutableRoaringBitmap applyAnd(MutableRoaringBitmap answer) {
+  public MutableRoaringBitmap applyAnd(ImmutableRoaringBitmap docIds) {
     MutableRoaringBitmap result = new MutableRoaringBitmap();
-    if (_evaluator.isAlwaysFalse()) {
-      return result;
-    }
-    IntIterator intIterator = answer.getIntIterator();
-    int docId = -1;
-    while (intIterator.hasNext() && docId < _endDocId) {
-      docId = intIterator.next();
-      if (docId >= _startDocId) {
-        _valueIterator.skipTo(docId);
-        _numEntriesScanned++;
-        if (_valueMatcher.doesCurrentEntryMatch(_valueIterator)) {
-          result.add(docId);
-        }
+    IntIterator docIdIterator = docIds.getIntIterator();
+    int nextDocId;
+    while (docIdIterator.hasNext() && (nextDocId = docIdIterator.next()) < _numDocs) {
+      _numEntriesScanned++;
+      if (_valueMatcher.doesValueMatch(nextDocId)) {
+        result.add(nextDocId);
       }
     }
     return result;
   }
 
   @Override
-  public int getNumEntriesScanned() {
+  public long getNumEntriesScanned() {
     return _numEntriesScanned;
   }
 
-  /**
-   * Helper method to get value matcher for a given data type.
-   * @param dataType data type for which to get the value matcher
-   * @return value matcher for the data type.
-   */
-  private static ValueMatcher getValueMatcherForType(FieldSpec.DataType dataType) {
-
-    switch (dataType) {
-      case INT:
-        return new IntMatcher();
-
-      case LONG:
-        return new LongMatcher();
-
-      case FLOAT:
-        return new FloatMatcher();
-
-      case DOUBLE:
-        return new DoubleMatcher();
-
-      case STRING:
-        return new StringMatcher();
-
-      case BYTES:
-        return new BytesMatcher();
-
-      default:
-        throw new UnsupportedOperationException("Index without dictionary not supported for data type: " + dataType);
+  private ValueMatcher getValueMatcher() {
+    if (_reader.isDictionaryEncoded()) {
+      return new DictIdMatcher();
+    } else {
+      switch (_reader.getValueType()) {
+        case INT:
+          return new IntMatcher();
+        case LONG:
+          return new LongMatcher();
+        case FLOAT:
+          return new FloatMatcher();
+        case DOUBLE:
+          return new DoubleMatcher();
+        case STRING:
+          return new StringMatcher();
+        case BYTES:
+          return new BytesMatcher();
+        default:
+          throw new UnsupportedOperationException();
+      }
     }
   }
 
-  private static abstract class ValueMatcher {
-    protected PredicateEvaluator _evaluator;
+  private interface ValueMatcher {
 
-    public void setEvaluator(PredicateEvaluator evaluator) {
-      _evaluator = evaluator;
-    }
-
-    abstract boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator);
+    /**
+     * Returns {@code true} if the value for the given document id matches the predicate, {@code false} Otherwise.
+     */
+    boolean doesValueMatch(int docId);
   }
 
-  private static class IntMatcher extends ValueMatcher {
+  private class DictIdMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextIntVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getDictId(docId, _readerContext));
     }
   }
 
-  private static class LongMatcher extends ValueMatcher {
+  private class IntMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextLongVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getInt(docId, _readerContext));
     }
   }
 
-  private static class FloatMatcher extends ValueMatcher {
+  private class LongMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextFloatVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getLong(docId, _readerContext));
     }
   }
 
-  private static class DoubleMatcher extends ValueMatcher {
+  private class FloatMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextDoubleVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getFloat(docId, _readerContext));
     }
   }
 
-  private static class StringMatcher extends ValueMatcher {
+  private class DoubleMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextStringVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getDouble(docId, _readerContext));
     }
   }
 
-  private static class BytesMatcher extends ValueMatcher {
+  private class StringMatcher implements ValueMatcher {
 
     @Override
-    public boolean doesCurrentEntryMatch(BlockSingleValIterator valueIterator) {
-      return _evaluator.applySV(valueIterator.nextBytesVal());
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getString(docId, _readerContext));
+    }
+  }
+
+  private class BytesMatcher implements ValueMatcher {
+
+    @Override
+    public boolean doesValueMatch(int docId) {
+      return _predicateEvaluator.applySV(_reader.getBytes(docId, _readerContext));
     }
   }
 }

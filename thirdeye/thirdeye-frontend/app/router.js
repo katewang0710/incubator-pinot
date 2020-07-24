@@ -23,13 +23,8 @@ Router.map(function() {
   this.route('anomalies');
 
   this.route('manage', function() {
-    this.route('alert', { path: 'alert/:alert_id' }, function() {
-      this.route('explore');
-      this.route('tune');
-      this.route('edit');
-    });
     this.route('alerts', function() {
-      this.route('performance');
+      this.route('index', { path: '/' });
     });
     this.route('explore', { path: 'explore/:alert_id'});
     this.route('yaml', { path: 'yaml/:alert_id' });
@@ -43,8 +38,6 @@ Router.map(function() {
 
   this.route('screenshot', { path: 'screenshot/:anomaly_id' });
   this.route('rootcause');
-  this.route('preview');
-  this.route('auto-onboard');
 });
 
 export default Router;

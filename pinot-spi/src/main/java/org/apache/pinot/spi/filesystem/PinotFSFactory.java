@@ -18,15 +18,17 @@
  */
 package org.apache.pinot.spi.filesystem;
 
-import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
-import org.apache.commons.configuration.Configuration;
+
+import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.plugin.PluginManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.base.Preconditions;
 
 
 /**
@@ -39,14 +41,17 @@ public class PinotFSFactory {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotFSFactory.class);
   private static final String LOCAL_PINOT_FS_SCHEME = "file";
   private static final String CLASS = "class";
+  private static final Map<String, PinotFS> PINOT_FS_MAP = new HashMap<String, PinotFS>() {
+    {
+      put(LOCAL_PINOT_FS_SCHEME, new LocalPinotFS());
+    }
+  };
 
-  private static Map<String, PinotFS> PINOT_FS_MAP = new HashMap<>();
-
-  public static void register(String scheme, String fsClassName, Configuration configuration) {
+  public static void register(String scheme, String fsClassName, PinotConfiguration fsConfiguration) {
     try {
       LOGGER.info("Initializing PinotFS for scheme {}, classname {}", scheme, fsClassName);
       PinotFS pinotFS = PluginManager.get().createInstance(fsClassName);
-      pinotFS.init(configuration);
+      pinotFS.init(fsConfiguration);
       PINOT_FS_MAP.put(scheme, pinotFS);
     } catch (Exception e) {
       LOGGER.error("Could not instantiate file system for class {} with scheme {}", fsClassName, scheme, e);
@@ -54,22 +59,19 @@ public class PinotFSFactory {
     }
   }
 
-  public static void init(Configuration fsConfig) {
+  public static void init(PinotConfiguration fsFactoryConfig) {
     // Get schemes and their respective classes
-    Iterator<String> keys = fsConfig.subset(CLASS).getKeys();
-    if (!keys.hasNext()) {
+    PinotConfiguration schemesConfiguration = fsFactoryConfig.subset(CLASS);
+    List<String> schemes = schemesConfiguration.getKeys();
+    if (!schemes.isEmpty()) {
       LOGGER.info("Did not find any fs classes in the configuration");
     }
-    while (keys.hasNext()) {
-      String key = keys.next();
-      String fsClassName = (String) fsConfig.getProperty(CLASS + "." + key);
-      LOGGER.info("Got scheme {}, classname {}, starting to initialize", key, fsClassName);
-      register(key, fsClassName, fsConfig.subset(key));
-    }
 
-    if (!PINOT_FS_MAP.containsKey(LOCAL_PINOT_FS_SCHEME)) {
-      LOGGER.info("LocalPinotFS not configured, adding as default");
-      PINOT_FS_MAP.put(LOCAL_PINOT_FS_SCHEME, new LocalPinotFS());
+    for (String scheme : schemes) {
+      String fsClassName = schemesConfiguration.getProperty(scheme);
+      PinotConfiguration fsConfiguration = fsFactoryConfig.subset(scheme);
+      LOGGER.info("Got scheme {}, initializing class {}", scheme, fsClassName);
+      register(scheme, fsClassName, fsConfiguration);
     }
   }
 

@@ -49,6 +49,8 @@ public interface DataProvider {
    * Returns a map of granular timeseries (keyed by slice) for a given set of slices.
    * The format of the DataFrame follows the standard convention of DataFrameUtils.
    *
+   * Note: The slices are treated left inclusive and right exclusive
+   *
    * @see MetricSlice
    * @see org.apache.pinot.thirdeye.dataframe.util.DataFrameUtils
    *
@@ -67,9 +69,11 @@ public interface DataProvider {
    *
    * @param slices metric slices
    * @param dimensions dimensions to group by
+   * @param limit max number of records to return ordered by metric value
+   *                 no limitation if it is a non-positive number
    * @return map of aggregation values (keyed by slice)
    */
-  Map<MetricSlice, DataFrame> fetchAggregates(Collection<MetricSlice> slices, List<String> dimensions);
+  Map<MetricSlice, DataFrame> fetchAggregates(Collection<MetricSlice> slices, List<String> dimensions, int limit);
 
   /**
    * Returns a multimap of anomalies (keyed by slice) for a given set of slices.

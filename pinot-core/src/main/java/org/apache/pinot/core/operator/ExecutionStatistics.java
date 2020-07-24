@@ -22,24 +22,29 @@ package org.apache.pinot.core.operator;
  * The <code>ExecutionStatistics</code> class contains the operator statistics during execution time.
  */
 public class ExecutionStatistics {
-  private long _numDocsScanned;
-  private long _numEntriesScannedInFilter;
-  private long _numEntriesScannedPostFilter;
-  private long _numTotalRawDocs;
-  private long _numSegmentsProcessed;
-  private long _numSegmentsMatched;
+  // The number of documents scanned post filtering.
+  private final long _numDocsScanned;
+  // The number of entries (single value entry contains 1 value, multi-value entry may contain multiple values) scanned
+  // in the filtering phase of the query execution: could be larger than the total scanned doc num because of multiple
+  // filtering predicates and multi-value entry.
+  // TODO: make the semantic of entry the same in _numEntriesScannedInFilter and _numEntriesScannedPostFilter. Currently
+  // _numEntriesScannedInFilter counts values in a multi-value entry multiple times whereas in
+  // _numEntriesScannedPostFilter counts all values in a multi-value entry only once. We can add a new stats
+  // _numValuesScannedInFilter to replace _numEntriesScannedInFilter.
+  private final long _numEntriesScannedInFilter;
+  // Equal to numDocsScanned * numberProjectedColumns.
+  private final long _numEntriesScannedPostFilter;
 
-  public ExecutionStatistics() {
-  }
+  // TODO: Remove _numTotalDocs because it is not execution stats, and it is not set from the operators because they
+  //       don't cover the pruned segments
+  private final long _numTotalDocs;
 
   public ExecutionStatistics(long numDocsScanned, long numEntriesScannedInFilter, long numEntriesScannedPostFilter,
-      long numTotalRawDocs) {
+      long numTotalDocs) {
     _numDocsScanned = numDocsScanned;
     _numEntriesScannedInFilter = numEntriesScannedInFilter;
     _numEntriesScannedPostFilter = numEntriesScannedPostFilter;
-    _numTotalRawDocs = numTotalRawDocs;
-    _numSegmentsProcessed = 1;
-    _numSegmentsMatched = (numDocsScanned == 0) ? 0 : 1;
+    _numTotalDocs = numTotalDocs;
   }
 
   public long getNumDocsScanned() {
@@ -54,37 +59,7 @@ public class ExecutionStatistics {
     return _numEntriesScannedPostFilter;
   }
 
-  public long getNumTotalRawDocs() {
-    return _numTotalRawDocs;
-  }
-
-  public long getNumSegmentsProcessed() {
-    return _numSegmentsProcessed;
-  }
-
-  public long getNumSegmentsMatched() {
-    return _numSegmentsMatched;
-  }
-
-  /**
-   * Merge another execution statistics into the current one.
-   *
-   * @param executionStatisticsToMerge execution statistics to merge.
-   */
-  public void merge(ExecutionStatistics executionStatisticsToMerge) {
-    _numDocsScanned += executionStatisticsToMerge._numDocsScanned;
-    _numEntriesScannedInFilter += executionStatisticsToMerge._numEntriesScannedInFilter;
-    _numEntriesScannedPostFilter += executionStatisticsToMerge._numEntriesScannedPostFilter;
-    _numTotalRawDocs += executionStatisticsToMerge._numTotalRawDocs;
-    _numSegmentsProcessed += executionStatisticsToMerge._numSegmentsProcessed;
-    _numSegmentsMatched += executionStatisticsToMerge._numSegmentsMatched;
-  }
-
-  @Override
-  public String toString() {
-    return "Execution Statistics:" + "\n  numDocsScanned: " + _numDocsScanned + "\n  numEntriesScannedInFilter: "
-        + _numEntriesScannedInFilter + "\n  numEntriesScannedPostFilter: " + _numEntriesScannedPostFilter
-        + "\n  numTotalRawDocs: " + _numTotalRawDocs + "\n  numSegmentsProcessed: " + _numSegmentsProcessed
-        + "\n  numSegmentsMatched: " + _numSegmentsMatched;
+  public long getNumTotalDocs() {
+    return _numTotalDocs;
   }
 }

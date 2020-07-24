@@ -19,22 +19,27 @@
 package org.apache.pinot.core.query.aggregation.function;
 
 import com.clearspring.analytics.stream.cardinality.HyperLogLog;
+import java.util.List;
+import java.util.Map;
 import org.apache.pinot.common.function.AggregationFunctionType;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
 import org.apache.pinot.core.common.BlockValSet;
 import org.apache.pinot.core.query.aggregation.AggregationResultHolder;
 import org.apache.pinot.core.query.aggregation.function.customobject.SerializedHLL;
 import org.apache.pinot.core.query.aggregation.groupby.GroupByResultHolder;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
 
 
-public class DistinctCountRawHLLAggregationFunction implements AggregationFunction<HyperLogLog, SerializedHLL> {
+public class DistinctCountRawHLLAggregationFunction extends BaseSingleInputAggregationFunction<HyperLogLog, SerializedHLL> {
   private final DistinctCountHLLAggregationFunction _distinctCountHLLAggregationFunction;
 
-  public DistinctCountRawHLLAggregationFunction() {
-    this(new DistinctCountHLLAggregationFunction());
+  public DistinctCountRawHLLAggregationFunction(List<ExpressionContext> arguments) {
+    this(arguments.get(0), new DistinctCountHLLAggregationFunction(arguments));
   }
 
-  DistinctCountRawHLLAggregationFunction(DistinctCountHLLAggregationFunction distinctCountHLLAggregationFunction) {
+  DistinctCountRawHLLAggregationFunction(ExpressionContext expression,
+      DistinctCountHLLAggregationFunction distinctCountHLLAggregationFunction) {
+    super(expression);
     _distinctCountHLLAggregationFunction = distinctCountHLLAggregationFunction;
   }
 
@@ -59,20 +64,22 @@ public class DistinctCountRawHLLAggregationFunction implements AggregationFuncti
   }
 
   @Override
-  public void aggregate(int length, AggregationResultHolder aggregationResultHolder, BlockValSet... blockValSets) {
-    _distinctCountHLLAggregationFunction.aggregate(length, aggregationResultHolder, blockValSets);
+  public void aggregate(int length, AggregationResultHolder aggregationResultHolder,
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    _distinctCountHLLAggregationFunction.aggregate(length, aggregationResultHolder, blockValSetMap);
   }
 
   @Override
   public void aggregateGroupBySV(int length, int[] groupKeyArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
-    _distinctCountHLLAggregationFunction.aggregateGroupBySV(length, groupKeyArray, groupByResultHolder, blockValSets);
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    _distinctCountHLLAggregationFunction.aggregateGroupBySV(length, groupKeyArray, groupByResultHolder, blockValSetMap);
   }
 
   @Override
   public void aggregateGroupByMV(int length, int[][] groupKeysArray, GroupByResultHolder groupByResultHolder,
-      BlockValSet... blockValSets) {
-    _distinctCountHLLAggregationFunction.aggregateGroupByMV(length, groupKeysArray, groupByResultHolder, blockValSets);
+      Map<ExpressionContext, BlockValSet> blockValSetMap) {
+    _distinctCountHLLAggregationFunction
+        .aggregateGroupByMV(length, groupKeysArray, groupByResultHolder, blockValSetMap);
   }
 
   @Override
@@ -107,6 +114,6 @@ public class DistinctCountRawHLLAggregationFunction implements AggregationFuncti
 
   @Override
   public SerializedHLL extractFinalResult(HyperLogLog intermediateResult) {
-    return SerializedHLL.of(intermediateResult);
+    return new SerializedHLL(intermediateResult);
   }
 }

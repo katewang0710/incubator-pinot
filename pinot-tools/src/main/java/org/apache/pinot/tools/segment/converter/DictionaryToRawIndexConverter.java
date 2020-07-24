@@ -27,20 +27,22 @@ import java.util.concurrent.TimeUnit;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.common.utils.StringUtil;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
-import org.apache.pinot.core.common.BlockSingleValIterator;
 import org.apache.pinot.core.common.DataSource;
 import org.apache.pinot.core.common.DataSourceMetadata;
 import org.apache.pinot.core.indexsegment.IndexSegment;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.core.io.compression.ChunkCompressorFactory;
-import org.apache.pinot.core.segment.creator.SingleValueRawIndexCreator;
+import org.apache.pinot.core.io.writer.impl.BaseChunkSVForwardIndexWriter;
+import org.apache.pinot.core.segment.creator.ForwardIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.SegmentColumnarIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.V1Constants;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
+import org.apache.pinot.spi.data.FieldSpec;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.slf4j.Logger;
@@ -50,7 +52,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Class to convert segment with dictionary encoded column to raw index (without dictionary).
  */
-@SuppressWarnings({"FieldCanBeLocal", "unused"})
+@SuppressWarnings({"FieldCanBeLocal", "unused", "rawtypes", "unchecked"})
 public class DictionaryToRawIndexConverter {
   private static final Logger LOGGER = LoggerFactory.getLogger(DictionaryToRawIndexConverter.class);
 
@@ -202,14 +204,13 @@ public class DictionaryToRawIndexConverter {
     if (segmentDir.isFile()) {
       if (segmentDir.getName().endsWith(".tar.gz") || segmentDir.getName().endsWith(".tgz")) {
         LOGGER.info("Uncompressing input segment '{}'", segmentDir);
-        newSegment = TarGzCompressionUtils.unTar(segmentDir, outputDir).get(0);
+        newSegment = TarGzCompressionUtils.untar(segmentDir, outputDir).get(0);
       } else {
         LOGGER.warn("Skipping non-segment file '{}'", segmentDir.getAbsoluteFile());
         return false;
       }
     } else {
       newSegment = new File(outputDir, segmentDir.getName());
-      newSegment.mkdir();
       FileUtils.copyDirectory(segmentDir, newSegment);
     }
 
@@ -224,7 +225,8 @@ public class DictionaryToRawIndexConverter {
 
     if (compressOutput) {
       LOGGER.info("Compressing segment '{}'", newSegment);
-      TarGzCompressionUtils.createTarGzOfDirectory(newSegment.getAbsolutePath(), newSegment.getAbsolutePath());
+      File segmentTarFile = new File(outputDir, newSegment.getName() + TarGzCompressionUtils.TAR_GZ_FILE_EXTENSION);
+      TarGzCompressionUtils.createTarGzFile(newSegment, segmentTarFile);
       FileUtils.deleteQuietly(newSegment);
     }
     return true;
@@ -262,7 +264,7 @@ public class DictionaryToRawIndexConverter {
    */
   private static void printUsage() {
     System.out.println("Usage: DictionaryTORawIndexConverter");
-    for (Field field : ColumnarToStarTreeConverter.class.getDeclaredFields()) {
+    for (Field field : DictionaryToRawIndexConverter.class.getDeclaredFields()) {
 
       if (field.isAnnotationPresent(Option.class)) {
         Option option = field.getAnnotation(Option.class);
@@ -284,6 +286,7 @@ public class DictionaryToRawIndexConverter {
   private void convertOneColumn(IndexSegment segment, String column, File newSegment)
       throws IOException {
     DataSource dataSource = segment.getDataSource(column);
+    ForwardIndexReader reader = dataSource.getForwardIndex();
     Dictionary dictionary = dataSource.getDictionary();
 
     if (dictionary == null) {
@@ -297,30 +300,52 @@ public class DictionaryToRawIndexConverter {
       return;
     }
 
-    int totalDocs = segment.getSegmentMetadata().getTotalDocs();
-    BlockSingleValIterator bvIter = (BlockSingleValIterator) dataSource.nextBlock().getBlockValueSet().iterator();
-
-    FieldSpec.DataType dataType = dataSourceMetadata.getDataType();
-    int lengthOfLongestEntry =
-        (dataType == FieldSpec.DataType.STRING) ? getLengthOfLongestEntry(bvIter, dictionary) : -1;
-
     ChunkCompressorFactory.CompressionType compressionType =
         ChunkCompressorFactory.CompressionType.valueOf(_compressionType);
-    SingleValueRawIndexCreator rawIndexCreator = SegmentColumnarIndexCreator
-        .getRawIndexCreatorForColumn(newSegment, compressionType, column, dataType, totalDocs, lengthOfLongestEntry);
+    FieldSpec.DataType dataType = dataSourceMetadata.getDataType();
+    int numDocs = segment.getSegmentMetadata().getTotalDocs();
+    int lengthOfLongestEntry = (dataType == FieldSpec.DataType.STRING) ? getLengthOfLongestEntry(dictionary) : -1;
 
-    int docId = 0;
-    bvIter.reset();
-    while (bvIter.hasNext()) {
-      int dictId = bvIter.nextIntVal();
-      Object value = dictionary.get(dictId);
-      rawIndexCreator.index(docId++, value);
-
-      if (docId % 1000000 == 0) {
-        LOGGER.info("Converted {} records.", docId);
+    try (ForwardIndexCreator rawIndexCreator = SegmentColumnarIndexCreator
+        .getRawIndexCreatorForColumn(newSegment, compressionType, column, dataType, numDocs, lengthOfLongestEntry,
+            false, BaseChunkSVForwardIndexWriter.DEFAULT_VERSION);
+        ForwardIndexReaderContext readerContext = reader.createContext()) {
+      switch (dataType) {
+        case INT:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putInt(dictionary.getIntValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case LONG:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putLong(dictionary.getLongValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case FLOAT:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putFloat(dictionary.getFloatValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case DOUBLE:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putDouble(dictionary.getDoubleValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case STRING:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putString(dictionary.getStringValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case BYTES:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putBytes(dictionary.getBytesValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        default:
+          throw new IllegalStateException();
       }
     }
-    rawIndexCreator.close();
+
     deleteForwardIndex(newSegment.getParentFile(), column, dataSourceMetadata.isSorted());
   }
 
@@ -343,16 +368,14 @@ public class DictionaryToRawIndexConverter {
 
   /**
    * Helper method to get the length
-   * @param bvIter Data source blockvalset iterator
    * @param dictionary Column dictionary
    * @return Length of longest entry
    */
-  private int getLengthOfLongestEntry(BlockSingleValIterator bvIter, Dictionary dictionary) {
+  private int getLengthOfLongestEntry(Dictionary dictionary) {
     int lengthOfLongestEntry = 0;
 
-    bvIter.reset();
-    while (bvIter.hasNext()) {
-      int dictId = bvIter.nextIntVal();
+    int length = dictionary.length();
+    for (int dictId = 0; dictId < length; dictId++) {
       String value = (String) dictionary.get(dictId);
       lengthOfLongestEntry = Math.max(lengthOfLongestEntry, StringUtil.encodeUtf8(value).length);
     }

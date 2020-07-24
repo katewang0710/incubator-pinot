@@ -22,10 +22,10 @@ import com.google.common.base.Preconditions;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
 import java.util.regex.Pattern;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.core.common.Predicate;
-import org.apache.pinot.core.common.predicate.RegexpLikePredicate;
+import org.apache.pinot.core.query.request.context.predicate.Predicate;
+import org.apache.pinot.core.query.request.context.predicate.RegexpLikePredicate;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
 /**
@@ -55,8 +55,8 @@ public class RegexpLikePredicateEvaluatorFactory {
    * @return Raw value based REGEXP_LIKE predicate evaluator
    */
   public static BaseRawValueBasedPredicateEvaluator newRawValueBasedEvaluator(RegexpLikePredicate regexpLikePredicate,
-      FieldSpec.DataType dataType) {
-    Preconditions.checkArgument(dataType == FieldSpec.DataType.STRING, "Unsupported data type: " + dataType);
+      DataType dataType) {
+    Preconditions.checkArgument(dataType == DataType.STRING, "Unsupported data type: " + dataType);
     return new RawValueBasedRegexpLikePredicateEvaluator(regexpLikePredicate);
   }
 
@@ -68,7 +68,7 @@ public class RegexpLikePredicateEvaluatorFactory {
     int[] _matchingDictIds;
 
     public DictionaryBasedRegexpLikePredicateEvaluator(RegexpLikePredicate regexpLikePredicate, Dictionary dictionary) {
-      _pattern = Pattern.compile(regexpLikePredicate.getRegex(), PATTERN_FLAG);
+      _pattern = Pattern.compile(regexpLikePredicate.getValue(), PATTERN_FLAG);
       _dictionary = dictionary;
     }
 
@@ -102,12 +102,17 @@ public class RegexpLikePredicateEvaluatorFactory {
     final Pattern _pattern;
 
     public RawValueBasedRegexpLikePredicateEvaluator(RegexpLikePredicate regexpLikePredicate) {
-      _pattern = Pattern.compile(regexpLikePredicate.getRegex(), PATTERN_FLAG);
+      _pattern = Pattern.compile(regexpLikePredicate.getValue(), PATTERN_FLAG);
     }
 
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.REGEXP_LIKE;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.STRING;
     }
 
     @Override

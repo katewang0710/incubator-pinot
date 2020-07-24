@@ -22,11 +22,15 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Serializable;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
-import org.apache.commons.configuration.Configuration;
+
 import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
+import org.apache.pinot.spi.env.PinotConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,18 +47,19 @@ import org.slf4j.LoggerFactory;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public abstract class PinotFS implements Closeable {
+public abstract class PinotFS implements Closeable, Serializable {
   private static final Logger LOGGER = LoggerFactory.getLogger(PinotFS.class);
 
   /**
    * Initializes the configurations specific to that filesystem. For instance, any security related parameters can be
    * initialized here and will not be logged.
    */
-  public abstract void init(Configuration config);
+  public abstract void init(PinotConfiguration config);
 
   /**
    * Creates a new directory. If parent directories are not created, it will create them.
    * If the directory exists, it will return true without doing anything.
+   * @return true if mkdir is successful
    * @throws IOException on IO failure
    */
   public abstract boolean mkdir(URI uri)
@@ -102,8 +107,13 @@ public abstract class PinotFS implements Closeable {
       }
     } else {
       // ensures the parent path of dst exists.
-      URI parentUri = Paths.get(dstUri).getParent().toUri();
-      mkdir(parentUri);
+      try {
+        Path parentPath = Paths.get(dstUri.getPath()).getParent();
+        URI parentUri = new URI(dstUri.getScheme(), dstUri.getHost(), parentPath.toString(), null);
+        mkdir(parentUri);
+      } catch (URISyntaxException e) {
+        throw new IOException(e);
+      }
     }
     return doMove(srcUri, dstUri);
   }
@@ -116,7 +126,9 @@ public abstract class PinotFS implements Closeable {
 
   /**
    * Copies the file or directory from the src to dst. The original file is retained. If the dst has parent directories
-   * that haven't been created, this method will create all the necessary parent directories.
+   * that haven't been created, this method will create all the necessary parent directories. If dst already exists,
+   * this will overwrite the existing file/directory in the path.
+   *
    * Note: In Pinot we recommend the full paths of both src and dst be specified.
    * For example, if a file /a/b/c is copied to a file /x/y/z, the directory /a/b still exists containing the file 'c'.
    * The dst file /x/y/z will contain the contents of 'c'.

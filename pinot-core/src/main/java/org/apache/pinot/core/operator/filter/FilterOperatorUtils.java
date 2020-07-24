@@ -25,9 +25,9 @@ import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pinot.core.common.DataSource;
-import org.apache.pinot.core.common.DataSourceMetadata;
-import org.apache.pinot.core.common.Predicate;
 import org.apache.pinot.core.operator.filter.predicate.PredicateEvaluator;
+import org.apache.pinot.core.operator.filter.predicate.RangePredicateEvaluatorFactory.OfflineDictionaryBasedRangePredicateEvaluator;
+import org.apache.pinot.core.query.request.context.predicate.Predicate;
 
 
 public class FilterOperatorUtils {
@@ -48,23 +48,26 @@ public class FilterOperatorUtils {
       return new MatchAllFilterOperator(numDocs);
     }
 
-    int startDocId = 0;
-    // NOTE: end document Id is inclusive
-    // TODO: make it exclusive
-    int endDocId = numDocs - 1;
-
-    // Use inverted index if the predicate type is not RANGE or REGEXP_LIKE for efficiency
-    DataSourceMetadata dataSourceMetadata = dataSource.getDataSourceMetadata();
     Predicate.Type predicateType = predicateEvaluator.getPredicateType();
-    if (dataSourceMetadata.hasInvertedIndex() && (predicateType != Predicate.Type.RANGE) && (predicateType
-        != Predicate.Type.REGEXP_LIKE)) {
-      if (dataSourceMetadata.isSorted()) {
-        return new SortedInvertedIndexBasedFilterOperator(predicateEvaluator, dataSource, startDocId, endDocId);
-      } else {
-        return new BitmapBasedFilterOperator(predicateEvaluator, dataSource, startDocId, endDocId);
+    if (predicateType == Predicate.Type.RANGE) {
+      if (dataSource.getDataSourceMetadata().isSorted()) {
+        return new SortedIndexBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
       }
+      if (dataSource.getRangeIndex() != null) {
+        return new RangeIndexBasedFilterOperator((OfflineDictionaryBasedRangePredicateEvaluator) predicateEvaluator,
+            dataSource, numDocs);
+      }
+      return new ScanBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
+    } else if (predicateType == Predicate.Type.REGEXP_LIKE) {
+      return new ScanBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
     } else {
-      return new ScanBasedFilterOperator(predicateEvaluator, dataSource, startDocId, endDocId);
+      if (dataSource.getDataSourceMetadata().isSorted()) {
+        return new SortedIndexBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
+      }
+      if (dataSource.getInvertedIndex() != null) {
+        return new BitmapBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
+      }
+      return new ScanBasedFilterOperator(predicateEvaluator, dataSource, numDocs);
     }
   }
 
@@ -117,7 +120,7 @@ public class FilterOperatorUtils {
       return childFilterOperators.get(0);
     } else {
       // Return the OR filter operator with child filter operators
-      return new OrFilterOperator(childFilterOperators);
+      return new OrFilterOperator(childFilterOperators, numDocs);
     }
   }
 
@@ -136,20 +139,26 @@ public class FilterOperatorUtils {
       }
 
       int getPriority(BaseFilterOperator filterOperator) {
-        if (filterOperator instanceof SortedInvertedIndexBasedFilterOperator) {
+        if (filterOperator instanceof SortedIndexBasedFilterOperator) {
           return 0;
         }
         if (filterOperator instanceof BitmapBasedFilterOperator) {
           return 1;
         }
-        if (filterOperator instanceof AndFilterOperator) {
+        if (filterOperator instanceof RangeIndexBasedFilterOperator) {
           return 2;
         }
-        if (filterOperator instanceof OrFilterOperator) {
+        if (filterOperator instanceof TextMatchFilterOperator) {
           return 3;
         }
+        if (filterOperator instanceof AndFilterOperator) {
+          return 4;
+        }
+        if (filterOperator instanceof OrFilterOperator) {
+          return 5;
+        }
         if (filterOperator instanceof ScanBasedFilterOperator) {
-          return getScanBasedFilterPriority((ScanBasedFilterOperator) filterOperator, 4, debugOptions);
+          return getScanBasedFilterPriority((ScanBasedFilterOperator) filterOperator, 6, debugOptions);
         }
         if (filterOperator instanceof ExpressionFilterOperator) {
           return 10;
@@ -172,17 +181,16 @@ public class FilterOperatorUtils {
    */
   private static int getScanBasedFilterPriority(ScanBasedFilterOperator scanBasedFilterOperator, int basePriority,
       @Nullable Map<String, String> debugOptions) {
-    boolean disabled = false;
     if (debugOptions != null
         && StringUtils.compareIgnoreCase(debugOptions.get(USE_SCAN_REORDER_OPTIMIZATION), "false") == 0) {
-      disabled = true;
-    }
-    DataSourceMetadata metadata = scanBasedFilterOperator.getDataSourceMetadata();
-    if (disabled || metadata == null || metadata.isSingleValue()) {
       return basePriority;
     }
 
-    // lower priority for multivalue
-    return basePriority + 1;
+    if (scanBasedFilterOperator.getDataSourceMetadata().isSingleValue()) {
+      return basePriority;
+    } else {
+      // Lower priority for multi-value column
+      return basePriority + 1;
+    }
   }
 }

@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import javax.annotation.Nullable;
+import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 
@@ -38,8 +39,10 @@ public class CompositeTransformer implements RecordTransformer {
    * <p>NOTE: DO NOT CHANGE THE ORDER OF THE RECORD TRANSFORMERS
    * <ul>
    *   <li>
-   *     We put {@link ExpressionTransformer} after {@link TimeTransformer} so that expression can work on outgoing time
-   *     column
+   *     {@link ExpressionTransformer} before everyone else, so that we get the real columns for other transformers to work on
+   *   </li>
+   *   <li>
+   *     {@link FilterTransformer} after ExpressionTransformer, so that we have source as well as destination columns
    *   </li>
    *   <li>
    *     We put {@link SanitizationTransformer} after {@link DataTypeTransformer} so that before sanitation, all values
@@ -47,9 +50,9 @@ public class CompositeTransformer implements RecordTransformer {
    *   </li>
    * </ul>
    */
-  public static CompositeTransformer getDefaultTransformer(Schema schema) {
+  public static CompositeTransformer getDefaultTransformer(TableConfig tableConfig, Schema schema) {
     return new CompositeTransformer(Arrays
-        .asList(new NullValueTransformer(schema), new TimeTransformer(schema), new ExpressionTransformer(schema),
+        .asList(new ExpressionTransformer(tableConfig, schema), new FilterTransformer(tableConfig), new NullValueTransformer(schema),
             new DataTypeTransformer(schema), new SanitizationTransformer(schema)));
   }
 

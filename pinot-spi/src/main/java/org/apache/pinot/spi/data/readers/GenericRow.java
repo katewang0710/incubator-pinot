@@ -37,8 +37,30 @@ import org.apache.pinot.spi.utils.JsonUtils;
  * from the {NullValueTransformer} should have {@code defaultNullValue} filled to the fields with {@code null}
  * value, so that for fields with {@code null} value, {@link #getValue(String)} will return the {@code defaultNullValue}
  * and {@link #isNullValue(String)} will return {@code true}.
+ *
+ * The fixed set of allowed data types for the fields in the GenericRow should be:
+ * Integer, Long, Float, Double, String, byte[], Object[] of the single-value types
+ * This is the fixed set of data types to be used by RecordExtractor and RecordReader to extract fields from the row,
+ * and by the ExpressionEvaluator to evaluate the result
+ * FIXME: Based on the current behavior, we support the following data types:
+ *  SV: Boolean, Byte, Character, Short, Integer, Long, Float, Double, String, byte[]
+ *  MV: Object[] or List of Byte, Character, Short, Integer, Long, Float, Double, String
+ *  We should not be using Boolean, Byte, Character and Short to keep it simple
  */
 public class GenericRow {
+
+  /**
+   * This key is used by a Decoder/RecordReader to handle 1 record to many records flattening.
+   * If a Decoder/RecordReader produces multiple GenericRows from the given record, they must be put into the destination GenericRow as a List<GenericRow> with this key
+   * The segment generation drivers handle this key as a special case and process the multiple records
+   */
+  public static final String MULTIPLE_RECORDS_KEY = "$MULTIPLE_RECORDS_KEY$";
+  /**
+   * This key is used by the FilterTransformer to skip records during ingestion
+   * The FilterTransformer puts this key into the GenericRow with value true, if the record matches the filtering criteria, based on FilterConfig
+   */
+  public static final String SKIP_RECORD_KEY = "$SKIP_RECORD_KEY$";
+
   private final Map<String, Object> _fieldToValueMap = new HashMap<>();
   private final Set<String> _nullValueFields = new HashSet<>();
 

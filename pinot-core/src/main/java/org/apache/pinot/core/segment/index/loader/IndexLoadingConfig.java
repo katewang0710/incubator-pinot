@@ -25,14 +25,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import org.apache.pinot.common.config.IndexingConfig;
-import org.apache.pinot.common.config.TableConfig;
 import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.core.data.manager.config.InstanceDataManagerConfig;
 import org.apache.pinot.core.indexsegment.generator.SegmentVersion;
 import org.apache.pinot.core.segment.index.loader.columnminmaxvalue.ColumnMinMaxValueGeneratorMode;
+import org.apache.pinot.spi.config.table.FieldConfig;
+import org.apache.pinot.spi.config.table.IndexingConfig;
+import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
 
 
 /**
@@ -40,15 +41,20 @@ import org.apache.pinot.core.segment.index.loader.columnminmaxvalue.ColumnMinMax
  */
 public class IndexLoadingConfig {
   private static final int DEFAULT_REALTIME_AVG_MULTI_VALUE_COUNT = 2;
+  private static final String SEGMENT_STORE_URI = "segment.store.uri";
 
   private ReadMode _readMode = ReadMode.DEFAULT_MODE;
   private List<String> _sortedColumns = Collections.emptyList();
   private Set<String> _invertedIndexColumns = new HashSet<>();
+  private Set<String> _textIndexColumns = new HashSet<>();
+  private Set<String> _rangeIndexColumns = new HashSet<>();
   private Set<String> _noDictionaryColumns = new HashSet<>(); // TODO: replace this by _noDictionaryConfig.
   private Map<String, String> _noDictionaryConfig = new HashMap<>();
   private Set<String> _varLengthDictionaryColumns = new HashSet<>();
   private Set<String> _onHeapDictionaryColumns = new HashSet<>();
   private Set<String> _bloomFilterColumns = new HashSet<>();
+  private List<StarTreeIndexConfig> _starTreeIndexConfigs;
+  private boolean _enableDefaultStarTree;
 
   private SegmentVersion _segmentVersion;
   private ColumnMinMaxValueGeneratorMode _columnMinMaxValueGeneratorMode = ColumnMinMaxValueGeneratorMode.DEFAULT_MODE;
@@ -57,14 +63,17 @@ public class IndexLoadingConfig {
   private boolean _isRealtimeOffheapAllocation;
   private boolean _isDirectRealtimeOffheapAllocation;
   private boolean _enableSplitCommitEndWithMetadata;
+  private String _segmentStoreURI;
 
-  public IndexLoadingConfig(@Nonnull InstanceDataManagerConfig instanceDataManagerConfig,
-      @Nonnull TableConfig tableConfig) {
+  // constructed from FieldConfig
+  private Map<String, Map<String, String>> _columnProperties = new HashMap<>();
+
+  public IndexLoadingConfig(InstanceDataManagerConfig instanceDataManagerConfig, TableConfig tableConfig) {
     extractFromInstanceConfig(instanceDataManagerConfig);
     extractFromTableConfig(tableConfig);
   }
 
-  private void extractFromTableConfig(@Nonnull TableConfig tableConfig) {
+  private void extractFromTableConfig(TableConfig tableConfig) {
     IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
     String tableReadMode = indexingConfig.getLoadMode();
     if (tableReadMode != null) {
@@ -81,6 +90,11 @@ public class IndexLoadingConfig {
       _invertedIndexColumns.addAll(invertedIndexColumns);
     }
 
+    List<String> rangeIndexColumns = indexingConfig.getRangeIndexColumns();
+    if (rangeIndexColumns != null) {
+      _rangeIndexColumns.addAll(rangeIndexColumns);
+    }
+
     List<String> bloomFilterColumns = indexingConfig.getBloomFilterColumns();
     if (bloomFilterColumns != null) {
       _bloomFilterColumns.addAll(bloomFilterColumns);
@@ -90,6 +104,15 @@ public class IndexLoadingConfig {
     if (noDictionaryColumns != null) {
       _noDictionaryColumns.addAll(noDictionaryColumns);
     }
+
+    List<FieldConfig> fieldConfigList = tableConfig.getFieldConfigList();
+    if (fieldConfigList != null) {
+      for (FieldConfig fieldConfig : fieldConfigList) {
+        _columnProperties.put(fieldConfig.getName(), fieldConfig.getProperties());
+      }
+    }
+
+    extractTextIndexColumnsFromTableConfig(tableConfig);
 
     Map<String, String> noDictionaryConfig = indexingConfig.getNoDictionaryConfig();
     if (noDictionaryConfig != null) {
@@ -106,6 +129,11 @@ public class IndexLoadingConfig {
       _onHeapDictionaryColumns.addAll(onHeapDictionaryColumns);
     }
 
+    if (indexingConfig.isEnableDynamicStarTreeCreation()) {
+      _starTreeIndexConfigs = indexingConfig.getStarTreeIndexConfigs();
+      _enableDefaultStarTree = indexingConfig.isEnableDefaultStarTree();
+    }
+
     String tableSegmentVersion = indexingConfig.getSegmentFormatVersion();
     if (tableSegmentVersion != null) {
       _segmentVersion = SegmentVersion.valueOf(tableSegmentVersion.toLowerCase());
@@ -118,7 +146,27 @@ public class IndexLoadingConfig {
     }
   }
 
-  private void extractFromInstanceConfig(@Nonnull InstanceDataManagerConfig instanceDataManagerConfig) {
+  /**
+   * Text index creation info for each column is specified
+   * using {@link FieldConfig} model of indicating per column
+   * encoding and indexing information. Since IndexLoadingConfig
+   * is created from TableConfig, we extract the text index info
+   * from fieldConfigList in TableConfig.
+   * @param tableConfig table config
+   */
+  private void extractTextIndexColumnsFromTableConfig(TableConfig tableConfig) {
+    List<FieldConfig> fieldConfigList = tableConfig.getFieldConfigList();
+    if (fieldConfigList != null) {
+      for (FieldConfig fieldConfig : fieldConfigList) {
+        String column = fieldConfig.getName();
+        if (fieldConfig.getIndexType() == FieldConfig.IndexType.TEXT) {
+          _textIndexColumns.add(column);
+        }
+      }
+    }
+  }
+
+  private void extractFromInstanceConfig(InstanceDataManagerConfig instanceDataManagerConfig) {
     ReadMode instanceReadMode = instanceDataManagerConfig.getReadMode();
     if (instanceReadMode != null) {
       _readMode = instanceReadMode;
@@ -139,6 +187,7 @@ public class IndexLoadingConfig {
       _realtimeAvgMultiValueCount = Integer.valueOf(avgMultiValueCount);
     }
     _enableSplitCommitEndWithMetadata = instanceDataManagerConfig.isEnableSplitCommitEndWithMetadata();
+    _segmentStoreURI = instanceDataManagerConfig.getConfig().getProperty(SEGMENT_STORE_URI);
   }
 
   /**
@@ -147,7 +196,6 @@ public class IndexLoadingConfig {
   public IndexLoadingConfig() {
   }
 
-  @Nonnull
   public ReadMode getReadMode() {
     return _readMode;
   }
@@ -155,60 +203,104 @@ public class IndexLoadingConfig {
   /**
    * For tests only.
    */
-  public void setReadMode(@Nonnull ReadMode readMode) {
+  public void setReadMode(ReadMode readMode) {
     _readMode = readMode;
   }
 
-  @Nonnull
   public List<String> getSortedColumns() {
     return _sortedColumns;
   }
 
-  @Nonnull
   public Set<String> getInvertedIndexColumns() {
     return _invertedIndexColumns;
+  }
+
+  public Set<String> getRangeIndexColumns() {
+    return _rangeIndexColumns;
+  }
+
+  public Map<String, Map<String, String>> getColumnProperties() {
+    return _columnProperties;
+  }
+
+  /**
+   * Used in two places:
+   * (1) In {@link org.apache.pinot.core.segment.index.column.PhysicalColumnIndexContainer}
+   * to create the index loading info for immutable segments
+   * (2) In {@link org.apache.pinot.core.data.manager.realtime.LLRealtimeSegmentDataManager}
+   * to create the {@link org.apache.pinot.core.realtime.impl.RealtimeSegmentConfig}.
+   * RealtimeSegmentConfig is used to specify the text index column info for newly
+   * to-be-created Mutable Segments
+   * @return a set containing names of text index columns
+   */
+  public Set<String> getTextIndexColumns() {
+    return _textIndexColumns;
   }
 
   /**
    * For tests only.
    */
   @VisibleForTesting
-  public void setInvertedIndexColumns(@Nonnull Set<String> invertedIndexColumns) {
+  public void setInvertedIndexColumns(Set<String> invertedIndexColumns) {
     _invertedIndexColumns = invertedIndexColumns;
   }
 
+  /**
+   * For tests only.
+   */
   @VisibleForTesting
-  public void setBloomFilterColumns(@Nonnull Set<String> bloomFilterColumns) {
+  public void setRangeIndexColumns(Set<String> rangeIndexColumns) {
+    _rangeIndexColumns = rangeIndexColumns;
+  }
+
+  /**
+   * Used directly from text search unit test code since the test code
+   * doesn't really have a table config and is directly testing the
+   * query execution code of text search using data from generated segments
+   * and then loading those segments.
+   */
+  @VisibleForTesting
+  public void setTextIndexColumns(Set<String> textIndexColumns) {
+    _textIndexColumns = textIndexColumns;
+  }
+
+  @VisibleForTesting
+  public void setBloomFilterColumns(Set<String> bloomFilterColumns) {
     _bloomFilterColumns = bloomFilterColumns;
   }
 
   @VisibleForTesting
-  public void setOnHeapDictionaryColumns(@Nonnull Set<String> onHeapDictionaryColumns) {
+  public void setOnHeapDictionaryColumns(Set<String> onHeapDictionaryColumns) {
     _onHeapDictionaryColumns = onHeapDictionaryColumns;
   }
 
-  @Nonnull
   public Set<String> getNoDictionaryColumns() {
     return _noDictionaryColumns;
   }
 
-  @Nonnull
   public Map<String, String> getnoDictionaryConfig() {
     return _noDictionaryConfig;
   }
 
-  @Nonnull
   public Set<String> getVarLengthDictionaryColumns() {
     return _varLengthDictionaryColumns;
   }
 
-  @Nonnull
   public Set<String> getOnHeapDictionaryColumns() {
     return _onHeapDictionaryColumns;
   }
 
   public Set<String> getBloomFilterColumns() {
     return _bloomFilterColumns;
+  }
+
+  @Nullable
+  public List<StarTreeIndexConfig> getStarTreeIndexConfigs() {
+    return _starTreeIndexConfigs;
+  }
+
+  public boolean isEnableDefaultStarTree() {
+    return _enableDefaultStarTree;
   }
 
   @Nullable
@@ -219,7 +311,7 @@ public class IndexLoadingConfig {
   /**
    * For tests only.
    */
-  public void setSegmentVersion(@Nonnull SegmentVersion segmentVersion) {
+  public void setSegmentVersion(SegmentVersion segmentVersion) {
     _segmentVersion = segmentVersion;
   }
 
@@ -239,10 +331,13 @@ public class IndexLoadingConfig {
     return _isDirectRealtimeOffheapAllocation;
   }
 
-  @Nonnull
   public ColumnMinMaxValueGeneratorMode getColumnMinMaxValueGeneratorMode() {
     return _columnMinMaxValueGeneratorMode;
   }
+
+
+  public String getSegmentStoreURI() { return _segmentStoreURI; }
+
 
   /**
    * For tests only.

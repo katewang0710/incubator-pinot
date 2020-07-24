@@ -25,12 +25,12 @@ import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.PriorityQueue;
-import org.apache.pinot.common.request.Selection;
-import org.apache.pinot.common.request.SelectionSort;
 import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.response.broker.SelectionResults;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataTable;
+import org.apache.pinot.core.query.request.context.OrderByExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
 
 
 /**
@@ -58,27 +58,29 @@ import org.apache.pinot.common.utils.DataTable;
  *   </li>
  * </ul>
  */
+@SuppressWarnings("rawtypes")
 public class SelectionOperatorService {
   private final List<String> _selectionColumns;
   private final DataSchema _dataSchema;
   private final int _offset;
   private final int _numRowsToKeep;
-  private final PriorityQueue<Serializable[]> _rows;
+  private final PriorityQueue<Object[]> _rows;
 
   /**
    * Constructor for <code>SelectionOperatorService</code> with {@link DataSchema}. (Inter segment)
    *
-   * @param selection selection query.
+   * @param queryContext Selection order-by query
    * @param dataSchema data schema.
    */
-  public SelectionOperatorService(Selection selection, DataSchema dataSchema) {
-    _selectionColumns = SelectionOperatorUtils.getSelectionColumns(selection.getSelectionColumns(), dataSchema);
+  public SelectionOperatorService(QueryContext queryContext, DataSchema dataSchema) {
+    _selectionColumns = SelectionOperatorUtils.getSelectionColumns(queryContext.getSelectExpressions(), dataSchema);
     _dataSchema = dataSchema;
-    // Select rows from offset to offset + size.
-    _offset = selection.getOffset();
-    _numRowsToKeep = _offset + selection.getSize();
+    // Select rows from offset to offset + limit.
+    _offset = queryContext.getOffset();
+    _numRowsToKeep = _offset + queryContext.getLimit();
+    assert queryContext.getOrderByExpressions() != null;
     _rows = new PriorityQueue<>(Math.min(_numRowsToKeep, SelectionOperatorUtils.MAX_ROW_HOLDER_INITIAL_CAPACITY),
-        getTypeCompatibleComparator(selection.getSelectionSortSequence()));
+        getTypeCompatibleComparator(queryContext.getOrderByExpressions()));
   }
 
   /**
@@ -87,9 +89,9 @@ public class SelectionOperatorService {
    *
    * @return flexible {@link Comparator} for selection rows.
    */
-  private Comparator<Serializable[]> getTypeCompatibleComparator(List<SelectionSort> sortSequence) {
+  private Comparator<Object[]> getTypeCompatibleComparator(List<OrderByExpressionContext> orderByExpressions) {
     // Compare all single-value columns
-    int numOrderByExpressions = sortSequence.size();
+    int numOrderByExpressions = orderByExpressions.size();
     List<Integer> valueIndexList = new ArrayList<>(numOrderByExpressions);
     for (int i = 0; i < numOrderByExpressions; i++) {
       if (!_dataSchema.getColumnDataType(i).isArray()) {
@@ -106,19 +108,20 @@ public class SelectionOperatorService {
       int valueIndex = valueIndexList.get(i);
       valueIndices[i] = valueIndex;
       isNumber[i] = _dataSchema.getColumnDataType(valueIndex).isNumber();
-      multipliers[i] = sortSequence.get(valueIndex).isIsAsc() ? -1 : 1;
+      multipliers[i] = orderByExpressions.get(valueIndex).isAsc() ? -1 : 1;
     }
 
     return (o1, o2) -> {
       for (int i = 0; i < numValuesToCompare; i++) {
         int index = valueIndices[i];
-        Serializable v1 = o1[index];
-        Serializable v2 = o2[index];
+        Object v1 = o1[index];
+        Object v2 = o2[index];
         int result;
         if (isNumber[i]) {
           result = Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
         } else {
-          result = ((String) v1).compareTo((String) v2);
+          //noinspection unchecked
+          result = ((Comparable) v1).compareTo(v2);
         }
         if (result != 0) {
           return result * multipliers[i];
@@ -133,7 +136,7 @@ public class SelectionOperatorService {
    *
    * @return selection results.
    */
-  public PriorityQueue<Serializable[]> getRows() {
+  public PriorityQueue<Object[]> getRows() {
     return _rows;
   }
 
@@ -145,7 +148,7 @@ public class SelectionOperatorService {
     for (DataTable dataTable : dataTables) {
       int numRows = dataTable.getNumberOfRows();
       for (int rowId = 0; rowId < numRows; rowId++) {
-        Serializable[] row = SelectionOperatorUtils.extractRowFromDataTable(dataTable, rowId);
+        Object[] row = SelectionOperatorUtils.extractRowFromDataTable(dataTable, rowId);
         SelectionOperatorUtils.addToPriorityQueue(row, _rows, _numRowsToKeep);
       }
     }
@@ -161,21 +164,32 @@ public class SelectionOperatorService {
    */
   public SelectionResults renderSelectionResultsWithOrdering(boolean preserveType) {
     LinkedList<Serializable[]> rowsInSelectionResults = new LinkedList<>();
-
     int[] columnIndices = SelectionOperatorUtils.getColumnIndices(_selectionColumns, _dataSchema);
-    DataSchema.ColumnDataType[] columnDataTypes;
+    int numColumns = columnIndices.length;
+    DataSchema.ColumnDataType[] columnDataTypes = _dataSchema.getColumnDataTypes();
+
     if (preserveType) {
-      columnDataTypes = null;
-    } else {
-      int numColumns = _selectionColumns.size();
-      columnDataTypes = new DataSchema.ColumnDataType[numColumns];
-      for (int i = 0; i < numColumns; i++) {
-        columnDataTypes[i] = _dataSchema.getColumnDataType(columnIndices[i]);
+      while (_rows.size() > _offset) {
+        Object[] row = _rows.poll();
+        assert row != null;
+        Serializable[] extractedRow = new Serializable[numColumns];
+        for (int i = 0; i < numColumns; i++) {
+          int columnIndex = columnIndices[i];
+          extractedRow[i] = SelectionOperatorUtils.convertValueToType(row[columnIndex], columnDataTypes[columnIndex]);
+        }
+        rowsInSelectionResults.addFirst(extractedRow);
       }
-    }
-    while (_rows.size() > _offset) {
-      rowsInSelectionResults
-          .addFirst(SelectionOperatorUtils.extractColumns(_rows.poll(), columnIndices, columnDataTypes));
+    } else {
+      while (_rows.size() > _offset) {
+        Object[] row = _rows.poll();
+        assert row != null;
+        Serializable[] extractedRow = new Serializable[numColumns];
+        for (int i = 0; i < numColumns; i++) {
+          int columnIndex = columnIndices[i];
+          extractedRow[i] = SelectionOperatorUtils.getFormattedValue(row[columnIndex], columnDataTypes[columnIndex]);
+        }
+        rowsInSelectionResults.addFirst(extractedRow);
+      }
     }
 
     return new SelectionResults(_selectionColumns, rowsInSelectionResults);
@@ -193,18 +207,29 @@ public class SelectionOperatorService {
     LinkedList<Object[]> rowsInSelectionResults = new LinkedList<>();
     int[] columnIndices = SelectionOperatorUtils.getColumnIndices(_selectionColumns, _dataSchema);
     int numColumns = columnIndices.length;
+    DataSchema.ColumnDataType[] columnDataTypes = _dataSchema.getColumnDataTypes();
 
     while (_rows.size() > _offset) {
-      Serializable[] row = _rows.poll();
+      Object[] row = _rows.poll();
+      assert row != null;
       Object[] extractedRow = new Object[numColumns];
       for (int i = 0; i < numColumns; i++) {
-        extractedRow[i] = row[columnIndices[i]];
+        int columnIndex = columnIndices[i];
+        extractedRow[i] = SelectionOperatorUtils.convertValueToType(row[columnIndex], columnDataTypes[columnIndex]);
       }
       rowsInSelectionResults.addFirst(extractedRow);
     }
 
-    // final data schema in ResultTable should be created based on order in _selectionColumns
-    DataSchema finalDataSchema = SelectionOperatorUtils.getResultTableDataSchema(_dataSchema, _selectionColumns);
-    return new ResultTable(finalDataSchema, rowsInSelectionResults);
+    // Construct the result data schema
+    String[] columnNames = _dataSchema.getColumnNames();
+    String[] resultColumnNames = new String[numColumns];
+    DataSchema.ColumnDataType[] resultColumnDataTypes = new DataSchema.ColumnDataType[numColumns];
+    for (int i = 0; i < numColumns; i++) {
+      int columnIndex = columnIndices[i];
+      resultColumnNames[i] = columnNames[columnIndex];
+      resultColumnDataTypes[i] = columnDataTypes[columnIndex];
+    }
+    DataSchema resultDataSchema = new DataSchema(resultColumnNames, resultColumnDataTypes);
+    return new ResultTable(resultDataSchema, rowsInSelectionResults);
   }
 }

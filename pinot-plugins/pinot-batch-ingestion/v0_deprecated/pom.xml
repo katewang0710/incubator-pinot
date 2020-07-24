@@ -26,7 +26,8 @@
   <parent>
     <artifactId>pinot-batch-ingestion</artifactId>
     <groupId>org.apache.pinot</groupId>
-    <version>0.3.0-SNAPSHOT</version>
+    <version>${revision}${sha1}</version>
+    <relativePath>..</relativePath>
   </parent>
 
   <artifactId>v0_deprecated</artifactId>
@@ -42,20 +43,5 @@
     <module>pinot-hadoop</module>
     <module>pinot-spark</module>
   </modules>
-
-  <dependencies>
-    <dependency>
-      <groupId>org.apache.pinot</groupId>
-      <artifactId>pinot-common</artifactId>
-      <scope>provided</scope>
-    </dependency>
-
-    <!-- test -->
-    <dependency>
-      <groupId>org.testng</groupId>
-      <artifactId>testng</artifactId>
-      <scope>test</scope>
-    </dependency>
-  </dependencies>
 
 </project>

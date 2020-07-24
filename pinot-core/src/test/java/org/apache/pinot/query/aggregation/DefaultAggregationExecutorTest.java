@@ -21,20 +21,12 @@ package org.apache.pinot.query.aggregation;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.Set;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.spi.data.MetricFieldSpec;
-import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.core.common.DataSource;
-import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.core.data.readers.GenericRowRecordReader;
 import org.apache.pinot.core.indexsegment.IndexSegment;
 import org.apache.pinot.core.indexsegment.generator.SegmentGeneratorConfig;
@@ -44,15 +36,21 @@ import org.apache.pinot.core.operator.ProjectionOperator;
 import org.apache.pinot.core.operator.blocks.TransformBlock;
 import org.apache.pinot.core.operator.filter.MatchAllFilterOperator;
 import org.apache.pinot.core.operator.transform.TransformOperator;
-import org.apache.pinot.core.plan.AggregationFunctionInitializer;
 import org.apache.pinot.core.plan.DocIdSetPlanNode;
 import org.apache.pinot.core.query.aggregation.AggregationExecutor;
-import org.apache.pinot.core.query.aggregation.AggregationFunctionContext;
 import org.apache.pinot.core.query.aggregation.DefaultAggregationExecutor;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.segment.creator.impl.SegmentIndexCreationDriverImpl;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.MetricFieldSpec;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -72,9 +70,9 @@ import org.testng.annotations.Test;
  * test other functions as well.
  * Asserts that aggregation results returned by the executor are as expected.
  */
+@SuppressWarnings("rawtypes")
 public class DefaultAggregationExecutorTest {
-  protected static Logger LOGGER = LoggerFactory.getLogger(DefaultAggregationExecutorTest.class);
-  private static File INDEX_DIR = new File(FileUtils.getTempDirectory() + File.separator + "AggregationExecutorTest");
+  private static final File INDEX_DIR = new File(FileUtils.getTempDirectory(), "DefaultAggregationExecutorTest");
   private static final String SEGMENT_NAME = "TestAggregation";
 
   private static final String METRIC_PREFIX = "metric_";
@@ -86,8 +84,8 @@ public class DefaultAggregationExecutorTest {
 
   public static IndexSegment _indexSegment;
   private Random _random;
-  private List<AggregationInfo> _aggregationInfoList;
   private String[] _columns;
+  private QueryContext _queryContext;
   private double[][] _inputData;
 
   /**
@@ -108,18 +106,15 @@ public class DefaultAggregationExecutorTest {
     _columns = new String[numColumns];
     setupSegment();
 
-    _aggregationInfoList = new ArrayList<>();
-
-    for (int i = 0; i < _columns.length; i++) {
-      AggregationInfo aggregationInfo = new AggregationInfo();
-      aggregationInfo.setAggregationType(AGGREGATION_FUNCTIONS[i]);
-
-      Map<String, String> params = new HashMap<>();
-      params.put("column", _columns[i]);
-
-      aggregationInfo.setAggregationParams(params);
-      _aggregationInfoList.add(aggregationInfo);
+    StringBuilder queryBuilder = new StringBuilder("SELECT");
+    for (int i = 0; i < numColumns; i++) {
+      queryBuilder.append(String.format(" %s(%s)", AGGREGATION_FUNCTIONS[i], _columns[i]));
+      if (i != numColumns - 1) {
+        queryBuilder.append(',');
+      }
     }
+    queryBuilder.append(" FROM testTable");
+    _queryContext = QueryContextConverterUtils.getQueryContextFromPQL(queryBuilder.toString());
   }
 
   /**
@@ -129,27 +124,19 @@ public class DefaultAggregationExecutorTest {
   @Test
   void testAggregation() {
     Map<String, DataSource> dataSourceMap = new HashMap<>();
-    Set<TransformExpressionTree> expressionTrees = new HashSet<>();
+    List<ExpressionContext> expressions = new ArrayList<>();
     for (String column : _indexSegment.getPhysicalColumnNames()) {
       dataSourceMap.put(column, _indexSegment.getDataSource(column));
-      expressionTrees.add(TransformExpressionTree.compileToExpressionTree(column));
+      expressions.add(ExpressionContext.forIdentifier(column));
     }
-    int totalRawDocs = _indexSegment.getSegmentMetadata().getTotalRawDocs();
-    MatchAllFilterOperator matchAllFilterOperator = new MatchAllFilterOperator(totalRawDocs);
+    int totalDocs = _indexSegment.getSegmentMetadata().getTotalDocs();
+    MatchAllFilterOperator matchAllFilterOperator = new MatchAllFilterOperator(totalDocs);
     DocIdSetOperator docIdSetOperator = new DocIdSetOperator(matchAllFilterOperator, DocIdSetPlanNode.MAX_DOC_PER_CALL);
     ProjectionOperator projectionOperator = new ProjectionOperator(dataSourceMap, docIdSetOperator);
-    TransformOperator transformOperator = new TransformOperator(projectionOperator, expressionTrees);
+    TransformOperator transformOperator = new TransformOperator(projectionOperator, expressions);
     TransformBlock transformBlock = transformOperator.nextBlock();
-    int numAggFuncs = _aggregationInfoList.size();
-    AggregationFunctionContext[] aggrFuncContextArray = new AggregationFunctionContext[numAggFuncs];
-    AggregationFunctionInitializer aggFuncInitializer =
-        new AggregationFunctionInitializer(_indexSegment.getSegmentMetadata());
-    for (int i = 0; i < numAggFuncs; i++) {
-      AggregationInfo aggregationInfo = _aggregationInfoList.get(i);
-      aggrFuncContextArray[i] = AggregationFunctionUtils.getAggregationFunctionContext(aggregationInfo);
-      aggrFuncContextArray[i].getAggregationFunction().accept(aggFuncInitializer);
-    }
-    AggregationExecutor aggregationExecutor = new DefaultAggregationExecutor(aggrFuncContextArray);
+    AggregationFunction[] aggregationFunctions = AggregationFunctionUtils.getAggregationFunctions(_queryContext);
+    AggregationExecutor aggregationExecutor = new DefaultAggregationExecutor(aggregationFunctions);
     aggregationExecutor.aggregate(transformBlock);
     List<Object> result = aggregationExecutor.getResult();
     for (int i = 0; i < result.size(); i++) {
@@ -175,12 +162,11 @@ public class DefaultAggregationExecutorTest {
       FileUtils.deleteQuietly(INDEX_DIR);
     }
 
-    SegmentGeneratorConfig config = new SegmentGeneratorConfig();
+    SegmentGeneratorConfig config =
+        new SegmentGeneratorConfig(new TableConfigBuilder(TableType.OFFLINE).setTableName("test").build(),
+            buildSchema());
     config.setSegmentName(SEGMENT_NAME);
     config.setOutDir(INDEX_DIR.getAbsolutePath());
-
-    Schema schema = buildSchema();
-    config.setSchema(schema);
 
     List<GenericRow> rows = new ArrayList<>(NUM_ROWS);
     for (int i = 0; i < NUM_ROWS; i++) {
@@ -199,7 +185,7 @@ public class DefaultAggregationExecutorTest {
     }
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
-    driver.init(config, new GenericRowRecordReader(rows, schema));
+    driver.init(config, new GenericRowRecordReader(rows));
     driver.build();
 
     _indexSegment = ImmutableSegmentLoader.load(new File(INDEX_DIR, driver.getSegmentName()), ReadMode.heap);

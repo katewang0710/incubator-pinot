@@ -20,25 +20,25 @@ package org.apache.pinot.core.segment.virtualcolumn;
 
 import java.io.IOException;
 import org.apache.pinot.common.utils.Pairs;
-import org.apache.pinot.core.io.reader.BaseSingleColumnSingleValueReader;
-import org.apache.pinot.core.io.reader.DataFileReader;
-import org.apache.pinot.core.io.reader.impl.ChunkReaderContext;
-import org.apache.pinot.core.io.reader.impl.v1.SortedIndexReader;
-import org.apache.pinot.core.io.reader.impl.v1.SortedIndexReaderImpl;
-import org.apache.pinot.core.segment.index.ColumnMetadata;
-import org.apache.pinot.core.segment.index.readers.BaseImmutableDictionary;
+import org.apache.pinot.core.segment.index.column.BaseVirtualColumnProvider;
+import org.apache.pinot.core.segment.index.metadata.ColumnMetadata;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.DocIdDictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.apache.pinot.core.segment.index.readers.InvertedIndexReader;
+import org.apache.pinot.core.segment.index.readers.SortedIndexReader;
 
 
 /**
- * Virtual column provider that returns the current document id.
+ * Virtual column provider that returns the document id.
  */
 public class DocIdVirtualColumnProvider extends BaseVirtualColumnProvider {
+  private static final DocIdSortedIndexReader DOC_ID_SORTED_INDEX_READER = new DocIdSortedIndexReader();
 
   @Override
-  public DataFileReader buildReader(VirtualColumnContext context) {
-    return new DocIdSingleValueReader();
+  public ForwardIndexReader<?> buildForwardIndex(VirtualColumnContext context) {
+    return DOC_ID_SORTED_INDEX_READER;
   }
 
   @Override
@@ -51,53 +51,26 @@ public class DocIdVirtualColumnProvider extends BaseVirtualColumnProvider {
     ColumnMetadata.Builder columnMetadataBuilder = super.getColumnMetadataBuilder(context);
     columnMetadataBuilder.setCardinality(context.getTotalDocCount()).setHasDictionary(true).setHasInvertedIndex(true)
         .setSingleValue(true).setIsSorted(true);
-
     return columnMetadataBuilder.build();
   }
 
   @Override
-  public InvertedIndexReader buildInvertedIndex(VirtualColumnContext context) {
-    return new DocIdInvertedIndex();
+  public InvertedIndexReader<?> buildInvertedIndex(VirtualColumnContext context) {
+    return DOC_ID_SORTED_INDEX_READER;
   }
 
-  private class DocIdSingleValueReader extends BaseSingleColumnSingleValueReader<ChunkReaderContext> {
+  private static class DocIdSortedIndexReader implements SortedIndexReader<ForwardIndexReaderContext> {
+
     @Override
-    public ChunkReaderContext createContext() {
-      return null;
+    public int getDictId(int docId, ForwardIndexReaderContext context) {
+      return docId;
     }
 
     @Override
-    public int getInt(int row) {
-      return row;
+    public void readDictIds(int[] docIds, int length, int[] dictIdBuffer, ForwardIndexReaderContext context) {
+      System.arraycopy(docIds, 0, dictIdBuffer, 0, length);
     }
 
-    @Override
-    public int getInt(int rowId, ChunkReaderContext context) {
-      return rowId;
-    }
-
-    @Override
-    public long getLong(int row) {
-      return row;
-    }
-
-    @Override
-    public long getLong(int rowId, ChunkReaderContext context) {
-      return rowId;
-    }
-
-    @Override
-    public void readValues(int[] rows, int rowStartPos, int rowSize, int[] values, int valuesStartPos) {
-      System.arraycopy(rows, rowStartPos, values, valuesStartPos, rowSize);
-    }
-
-    @Override
-    public void close()
-        throws IOException {
-    }
-  }
-
-  private class DocIdInvertedIndex extends BaseSingleColumnSingleValueReader<SortedIndexReaderImpl.Context> implements SortedIndexReader<SortedIndexReaderImpl.Context> {
     @Override
     public Pairs.IntPair getDocIds(int dictId) {
       return new Pairs.IntPair(dictId, dictId);
@@ -106,72 +79,6 @@ public class DocIdVirtualColumnProvider extends BaseVirtualColumnProvider {
     @Override
     public void close()
         throws IOException {
-    }
-
-    @Override
-    public SortedIndexReaderImpl.Context createContext() {
-      return null;
-    }
-
-    @Override
-    public int getInt(int row) {
-      return row;
-    }
-
-    @Override
-    public int getInt(int rowId, SortedIndexReaderImpl.Context context) {
-      return rowId;
-    }
-  }
-
-  private class DocIdDictionary extends BaseImmutableDictionary {
-    final int _numDocs;
-
-    DocIdDictionary(int numDocs) {
-      super(numDocs);
-      _numDocs = numDocs;
-    }
-
-    @Override
-    public int insertionIndexOf(String stringValue) {
-      int intValue = Integer.parseInt(stringValue);
-      if (intValue < 0) {
-        return -1;
-      } else if (intValue >= _numDocs) {
-        return -(_numDocs + 1);
-      } else {
-        return intValue;
-      }
-    }
-
-    @Override
-    public Integer get(int dictId) {
-      return dictId;
-    }
-
-    @Override
-    public int getIntValue(int dictId) {
-      return dictId;
-    }
-
-    @Override
-    public long getLongValue(int dictId) {
-      return dictId;
-    }
-
-    @Override
-    public float getFloatValue(int dictId) {
-      return dictId;
-    }
-
-    @Override
-    public double getDoubleValue(int dictId) {
-      return dictId;
-    }
-
-    @Override
-    public String getStringValue(int dictId) {
-      return Integer.toString(dictId);
     }
   }
 }

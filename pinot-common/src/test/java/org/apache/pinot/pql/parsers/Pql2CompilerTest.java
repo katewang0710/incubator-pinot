@@ -28,6 +28,7 @@ import org.apache.pinot.common.request.AggregationInfo;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.FilterOperator;
+import org.apache.pinot.common.request.FilterQuery;
 import org.apache.pinot.common.request.Function;
 import org.apache.pinot.common.request.GroupBy;
 import org.apache.pinot.common.request.SelectionSort;
@@ -37,6 +38,8 @@ import org.apache.pinot.pql.parsers.pql2.ast.TopAstNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 
@@ -46,6 +49,20 @@ import org.testng.annotations.Test;
 public class Pql2CompilerTest {
   private static final Pql2Compiler COMPILER = new Pql2Compiler();
   private static final Logger LOGGER = LoggerFactory.getLogger(Pql2Compiler.class);
+
+  @BeforeClass
+  public void setUp() {
+    Pql2Compiler.ENABLE_PINOT_QUERY = true;
+    Pql2Compiler.VALIDATE_CONVERTER = true;
+    Pql2Compiler.FAIL_ON_CONVERSION_ERROR = true;
+  }
+
+  @AfterClass
+  public void tearDown() {
+    Pql2Compiler.ENABLE_PINOT_QUERY = false;
+    Pql2Compiler.VALIDATE_CONVERTER = false;
+    Pql2Compiler.FAIL_ON_CONVERSION_ERROR = false;
+  }
 
   @Test
   public void testQuotedStrings() {
@@ -138,7 +155,6 @@ public class Pql2CompilerTest {
     assertCompilationFails("select top 5 count(*) from a top 8");
     assertCompilationFails("select count(*) from a where a = 1 limit 5 where b = 2");
     assertCompilationFails("select count(*) from a group by b limit 5 group by b");
-    assertCompilationFails("select count(*) from a having sum(a) = 8 limit 5 having sum(a) = 9");
     assertCompilationFails("select count(*) from a order by b limit 5 order by c");
     assertCompilationFails("select count(*) from a limit 5 limit 5");
   }
@@ -183,6 +199,33 @@ public class Pql2CompilerTest {
   }
 
   @Test
+  public void testGroupByTopLimitBehavior() {
+    BrokerRequest brokerRequest = COMPILER.compileToBrokerRequest("select count(*) from myTable group by dimA top 200");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 200);
+    brokerRequest = COMPILER.compileToBrokerRequest("select count(*) from myTable group by dimA limit 300");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 300);
+    brokerRequest = COMPILER.compileToBrokerRequest("select count(*) from myTable group by dimA");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 10);
+    brokerRequest = COMPILER.compileToBrokerRequest("select count(*) from myTable group by dimA top 200 LIMIT 300");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 200);
+    brokerRequest = COMPILER.compileToBrokerRequest("select count(*) from myTable group by dimA LIMIT 0");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 10);
+  }
+
+  @Test
+  public void testGroupByOrderBy() {
+    BrokerRequest brokerRequest = COMPILER.compileToBrokerRequest(
+        "select sum(rsvp_count), count(*) from meetupRsvp group by group_city order by sum(rsvp_count) DESC limit 200");
+    Assert.assertEquals(brokerRequest.getGroupBy().getTopN(), 200);
+    Assert.assertEquals(brokerRequest.getGroupBy().getExpressions().get(0), "group_city");
+    Assert.assertEquals(brokerRequest.getPinotQuery().getGroupByList().get(0).getIdentifier().getName(), "group_city");
+    Assert.assertEquals(brokerRequest.getOrderBy().get(0).getColumn(), "sum(rsvp_count)");
+    Assert.assertEquals(
+        brokerRequest.getPinotQuery().getOrderByList().get(0).getFunctionCall().getOperands().get(0).getIdentifier()
+            .getName(), "sum(rsvp_count)");
+  }
+
+  @Test
   public void testRejectInvalidLexerToken() {
     assertCompilationFails("select foo from bar where baz ?= 2");
     assertCompilationFails("select foo from bar where baz =! 2");
@@ -213,41 +256,9 @@ public class Pql2CompilerTest {
 
   @Test
   public void testCStyleInequalityOperator() {
-
     BrokerRequest brokerRequest =
         COMPILER.compileToBrokerRequest("select * from vegetables where name != 'Brussels sprouts'");
     Assert.assertEquals(brokerRequest.getFilterQuery().getOperator(), FilterOperator.NOT);
-  }
-
-  @Test(enabled = false)
-  public void testCompilationWithHaving() {
-    BrokerRequest brokerRequest = COMPILER
-        .compileToBrokerRequest("select avg(age) as avg_age from person group by address_city having avg(age)=20");
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getOperator(), FilterOperator.EQUALITY);
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getAggregationInfo().getAggregationType(), "avg");
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getAggregationInfo().getAggregationParams().get("column"),
-        "age");
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getValue().get(0), "20");
-    brokerRequest = COMPILER.compileToBrokerRequest(
-        "select count(*) as count from sell group by price having count(*) > 100 AND count(*)<200");
-    Assert.assertEquals(brokerRequest.getHavingFilterSubQueryMap().getFilterQueryMap().size(), 3);
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getOperator(), FilterOperator.AND);
-    brokerRequest = COMPILER.compileToBrokerRequest(
-        "select count(*) as count, avg(price) as avgprice from sell having count(*) > 0 OR (avg(price) < 45 AND count(*) > 22)");
-    Assert.assertEquals(brokerRequest.getHavingFilterSubQueryMap().getFilterQueryMap().size(), 5);
-
-    brokerRequest = COMPILER.compileToBrokerRequest(
-        "SELECT count(*) FROM mytable WHERE DaysSinceEpoch >= 16312 group by Carrier having count(*) in (375,5005,1099)");
-    Assert.assertEquals(brokerRequest.getHavingFilterSubQueryMap().getFilterQueryMap().size(), 1);
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getOperator(), FilterOperator.IN);
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getValue().size(), 1);
-    Assert.assertTrue(brokerRequest.getHavingFilterQuery().getValue().get(0).contains("375"));
-    Assert.assertTrue(brokerRequest.getHavingFilterQuery().getValue().get(0).contains("5005"));
-    Assert.assertTrue(brokerRequest.getHavingFilterQuery().getValue().get(0).contains("1099"));
-    brokerRequest = COMPILER.compileToBrokerRequest(
-        "SELECT count(*) FROM mytable WHERE DaysSinceEpoch >= 16312 group by Carrier having count(*) not in (375,5005,1099)");
-    Assert.assertEquals(brokerRequest.getHavingFilterSubQueryMap().getFilterQueryMap().size(), 1);
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getOperator(), FilterOperator.NOT_IN);
   }
 
   @Test
@@ -306,14 +317,11 @@ public class Pql2CompilerTest {
     Assert.assertEquals(expTree.getValue(), "a.b.c");
 
     BrokerRequest brokerRequest = COMPILER.compileToBrokerRequest(
-        "select avg(`attributes.age`) as `avg_age` from `person` group by `attributes.address_city` having avg(`attributes.age`)=20");
+        "select avg(`attributes.age`) as `avg_age` from `person` group by `attributes.address_city`");
 
-    Assert.assertEquals(brokerRequest.getAggregationsInfo().get(0).getAggregationParams().get("column"),
-        "attributes.age");
+    Assert.assertEquals(brokerRequest.getAggregationsInfo().get(0).getExpressions().get(0), "attributes.age");
     Assert.assertEquals(brokerRequest.getGroupBy().getExpressions(),
         Collections.singletonList("attributes.address_city"));
-    Assert.assertEquals(brokerRequest.getHavingFilterQuery().getAggregationInfo().getAggregationParams().get("column"),
-        "attributes.age");
 
     // Test PinotQuery
     Assert.assertEquals(
@@ -333,8 +341,8 @@ public class Pql2CompilerTest {
         COMPILER.compileToBrokerRequest("SELECT SUM('foo'), MAX(\"bar\") FROM table GROUP BY 'foo', \"bar\"");
     List<AggregationInfo> aggregationInfos = brokerRequest.getAggregationsInfo();
     Assert.assertEquals(aggregationInfos.size(), 2);
-    Assert.assertEquals(aggregationInfos.get(0).getAggregationParams().get("column"), "foo");
-    Assert.assertEquals(aggregationInfos.get(1).getAggregationParams().get("column"), "bar");
+    Assert.assertEquals(aggregationInfos.get(0).getExpressions().get(0), "foo");
+    Assert.assertEquals(aggregationInfos.get(1).getExpressions().get(0), "bar");
     List<String> expressions = brokerRequest.getGroupBy().getExpressions();
     Assert.assertEquals(expressions.size(), 2);
     Assert.assertEquals(expressions.get(0), "foo");
@@ -357,7 +365,7 @@ public class Pql2CompilerTest {
         COMPILER.compileToBrokerRequest("SELECT SUM(ADD(foo, 'bar')) FROM table GROUP BY SUB(\"foo\", bar)");
     aggregationInfos = brokerRequest.getAggregationsInfo();
     Assert.assertEquals(aggregationInfos.size(), 1);
-    Assert.assertEquals(aggregationInfos.get(0).getAggregationParams().get("column"), "add(foo,'bar')");
+    Assert.assertEquals(aggregationInfos.get(0).getExpressions().get(0), "add(foo,'bar')");
     expressions = brokerRequest.getGroupBy().getExpressions();
     Assert.assertEquals(expressions.size(), 1);
     Assert.assertEquals(expressions.get(0), "sub('foo',bar)");
@@ -390,9 +398,6 @@ public class Pql2CompilerTest {
   @Test
   public void testConverter()
       throws IOException {
-    Pql2Compiler.ENABLE_PINOT_QUERY = true;
-    Pql2Compiler.VALIDATE_CONVERTER = true;
-    Pql2Compiler.FAIL_ON_CONVERSION_ERROR = true;
     COMPILER.compileToBrokerRequest("Select * from T where a IN (1,2,2,3,4)");
 
     COMPILER.compileToBrokerRequest("SELECT MIN(div(DaysSinceEpoch,2)) FROM mytable");
@@ -418,9 +423,6 @@ public class Pql2CompilerTest {
         throw e;
       }
     }
-    Pql2Compiler.ENABLE_PINOT_QUERY = true;
-    Pql2Compiler.VALIDATE_CONVERTER = true;
-    Pql2Compiler.FAIL_ON_CONVERSION_ERROR = true;
   }
 
   /**
@@ -475,5 +477,16 @@ public class Pql2CompilerTest {
       Assert.assertEquals(orderBy.getColumn(), orderBys.get(i));
       Assert.assertEquals(orderBy.isIsAsc(), isAscs.get(i).booleanValue());
     }
+  }
+
+  @Test
+  public void testTextMatch() {
+    String query = "SELECT text_col FROM foo WHERE TEXT_MATCH(text_col, '\"Foo bar\"')";
+    BrokerRequest request = COMPILER.compileToBrokerRequest(query);
+    FilterQuery filterQuery = request.getFilterQuery();
+    Assert.assertEquals(filterQuery.getColumn(), "text_col");
+    Assert.assertEquals(filterQuery.getValue().size(), 1);
+    Assert.assertEquals(filterQuery.getValue().get(0), "\"Foo bar\"");
+    Assert.assertEquals(filterQuery.getOperator(), FilterOperator.TEXT_MATCH);
   }
 }

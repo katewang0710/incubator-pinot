@@ -18,13 +18,9 @@
  */
 package org.apache.pinot.broker.requesthandler;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Splitter;
-import com.google.common.util.concurrent.RateLimiter;
 import java.net.InetAddress;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -32,20 +28,24 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.commons.configuration.Configuration;
+
+import org.apache.calcite.sql.SqlKind;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.helix.ZNRecord;
+import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.pinot.broker.api.RequestStatistics;
 import org.apache.pinot.broker.api.RequesterIdentity;
 import org.apache.pinot.broker.broker.AccessControlFactory;
 import org.apache.pinot.broker.queryquota.QueryQuotaManager;
+import org.apache.pinot.broker.routing.RoutingManager;
 import org.apache.pinot.broker.routing.RoutingTable;
-import org.apache.pinot.broker.routing.RoutingTableLookupRequest;
-import org.apache.pinot.broker.routing.TimeBoundaryService;
-import org.apache.pinot.common.config.TableNameBuilder;
+import org.apache.pinot.broker.routing.timeboundary.TimeBoundaryInfo;
 import org.apache.pinot.common.exception.QueryException;
 import org.apache.pinot.common.function.AggregationFunctionType;
 import org.apache.pinot.common.metrics.BrokerMeter;
@@ -53,29 +53,50 @@ import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.metrics.BrokerQueryPhase;
 import org.apache.pinot.common.request.AggregationInfo;
 import org.apache.pinot.common.request.BrokerRequest;
+import org.apache.pinot.common.request.Expression;
+import org.apache.pinot.common.request.ExpressionType;
 import org.apache.pinot.common.request.FilterOperator;
 import org.apache.pinot.common.request.FilterQuery;
 import org.apache.pinot.common.request.FilterQueryMap;
+import org.apache.pinot.common.request.Function;
+import org.apache.pinot.common.request.Identifier;
+import org.apache.pinot.common.request.Literal;
+import org.apache.pinot.common.request.PinotQuery;
+import org.apache.pinot.common.request.Selection;
 import org.apache.pinot.common.request.SelectionSort;
+import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.common.response.BrokerResponse;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
+import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.utils.CommonConstants;
 import org.apache.pinot.common.utils.CommonConstants.Broker;
+import org.apache.pinot.common.utils.DataSchema;
+import org.apache.pinot.common.utils.helix.TableCache;
+import org.apache.pinot.common.utils.request.RequestUtils;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
 import org.apache.pinot.core.query.reduce.BrokerReduceService;
 import org.apache.pinot.core.transport.ServerInstance;
 import org.apache.pinot.core.util.QueryOptions;
-import org.apache.pinot.pql.parsers.pql2.ast.FunctionCallAstNode;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.BytesUtils;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
+import org.apache.pinot.sql.parsers.CalciteSqlParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Splitter;
+import com.google.common.util.concurrent.RateLimiter;
 
 
 @ThreadSafe
 public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   private static final Logger LOGGER = LoggerFactory.getLogger(BaseBrokerRequestHandler.class);
 
-  protected final Configuration _config;
-  protected final RoutingTable _routingTable;
-  protected final TimeBoundaryService _timeBoundaryService;
+  protected final PinotConfiguration _config;
+  protected final RoutingManager _routingManager;
   protected final AccessControlFactory _accessControlFactory;
   protected final QueryQuotaManager _queryQuotaManager;
   protected final BrokerMetrics _brokerMetrics;
@@ -90,27 +111,42 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
   protected final int _queryLogLength;
 
   private final RateLimiter _queryLogRateLimiter;
+
   private final RateLimiter _numDroppedLogRateLimiter;
   private final AtomicInteger _numDroppedLog;
 
-  public BaseBrokerRequestHandler(Configuration config, RoutingTable routingTable,
-      TimeBoundaryService timeBoundaryService, AccessControlFactory accessControlFactory,
-      QueryQuotaManager queryQuotaManager, BrokerMetrics brokerMetrics) {
+  private final boolean _enableCaseInsensitive;
+  private final boolean _enableQueryLimitOverride;
+  private final int _defaultHllLog2m;
+  private final TableCache _tableCache;
+
+  public BaseBrokerRequestHandler(PinotConfiguration config, RoutingManager routingManager,
+      AccessControlFactory accessControlFactory, QueryQuotaManager queryQuotaManager, BrokerMetrics brokerMetrics,
+      ZkHelixPropertyStore<ZNRecord> propertyStore) {
     _config = config;
-    _routingTable = routingTable;
-    _timeBoundaryService = timeBoundaryService;
+    _routingManager = routingManager;
     _accessControlFactory = accessControlFactory;
     _queryQuotaManager = queryQuotaManager;
     _brokerMetrics = brokerMetrics;
 
-    _brokerId = config.getString(Broker.CONFIG_OF_BROKER_ID, getDefaultBrokerId());
-    _brokerTimeoutMs = config.getLong(Broker.CONFIG_OF_BROKER_TIMEOUT_MS, Broker.DEFAULT_BROKER_TIMEOUT_MS);
-    _queryResponseLimit =
-        config.getInt(Broker.CONFIG_OF_BROKER_QUERY_RESPONSE_LIMIT, Broker.DEFAULT_BROKER_QUERY_RESPONSE_LIMIT);
-    _queryLogLength = config.getInt(Broker.CONFIG_OF_BROKER_QUERY_LOG_LENGTH, Broker.DEFAULT_BROKER_QUERY_LOG_LENGTH);
-    _queryLogRateLimiter = RateLimiter.create(config.getDouble(Broker.CONFIG_OF_BROKER_QUERY_LOG_MAX_RATE_PER_SECOND,
-        Broker.DEFAULT_BROKER_QUERY_LOG_MAX_RATE_PER_SECOND));
+    _enableCaseInsensitive = _config.getProperty(CommonConstants.Helix.ENABLE_CASE_INSENSITIVE_KEY, false);
+    if (_enableCaseInsensitive) {
+      _tableCache = new TableCache(propertyStore);
+    } else {
+      _tableCache = null;
+    }
+    _defaultHllLog2m = _config
+        .getProperty(CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M_KEY, CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M);
 
+    _enableQueryLimitOverride = _config.getProperty(Broker.CONFIG_OF_ENABLE_QUERY_LIMIT_OVERRIDE, false);
+
+    _brokerId = config.getProperty(Broker.CONFIG_OF_BROKER_ID, getDefaultBrokerId());
+    _brokerTimeoutMs = config.getProperty(Broker.CONFIG_OF_BROKER_TIMEOUT_MS, Broker.DEFAULT_BROKER_TIMEOUT_MS);
+    _queryResponseLimit =
+        config.getProperty(Broker.CONFIG_OF_BROKER_QUERY_RESPONSE_LIMIT, Broker.DEFAULT_BROKER_QUERY_RESPONSE_LIMIT);
+    _queryLogLength = config.getProperty(Broker.CONFIG_OF_BROKER_QUERY_LOG_LENGTH, Broker.DEFAULT_BROKER_QUERY_LOG_LENGTH);
+    _queryLogRateLimiter = RateLimiter.create(config.getProperty(Broker.CONFIG_OF_BROKER_QUERY_LOG_MAX_RATE_PER_SECOND,
+        Broker.DEFAULT_BROKER_QUERY_LOG_MAX_RATE_PER_SECOND));
     _numDroppedLog = new AtomicInteger(0);
     _numDroppedLogRateLimiter = RateLimiter.create(1.0);
 
@@ -154,6 +190,31 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       requestStatistics.setErrorCode(QueryException.PQL_PARSING_ERROR_CODE);
       return new BrokerResponseNative(QueryException.getException(QueryException.PQL_PARSING_ERROR, e));
     }
+    if (isLiteralOnlyQuery(brokerRequest)) {
+      LOGGER.debug("Request {} contains only Literal, skipping server query: {}", requestId, query);
+      try {
+        return processLiteralOnlyBrokerRequest(brokerRequest, compilationStartTimeNs, requestStatistics);
+      } catch (Exception e) {
+        // TODO: refine the exceptions here to early termination the queries won't requires to send to servers.
+        LOGGER
+            .warn("Unable to execute literal request {}: {} at broker, fallback to server query. {}", requestId, query,
+                e.getMessage());
+      }
+    }
+    updateQuerySource(brokerRequest);
+    if (_enableCaseInsensitive) {
+      try {
+        handleCaseSensitivity(brokerRequest);
+      } catch (Exception e) {
+        LOGGER.warn("Caught exception while rewriting PQL to make it case-insensitive {}: {}, {}", requestId, query, e);
+      }
+    }
+    if (_defaultHllLog2m > 0) {
+      handleHyperloglogLog2mOverride(brokerRequest, _defaultHllLog2m);
+    }
+    if (_enableQueryLimitOverride) {
+      handleQueryLimitOverride(brokerRequest, _queryResponseLimit);
+    }
     String tableName = brokerRequest.getQuerySource().getTableName();
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
     requestStatistics.setTableName(rawTableName);
@@ -176,25 +237,25 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     // Get the tables hit by the request
     String offlineTableName = null;
     String realtimeTableName = null;
-    CommonConstants.Helix.TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
-    if (tableType == CommonConstants.Helix.TableType.OFFLINE) {
+    TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableName);
+    if (tableType == TableType.OFFLINE) {
       // Offline table
-      if (_routingTable.routingTableExists(tableName)) {
+      if (_routingManager.routingExists(tableName)) {
         offlineTableName = tableName;
       }
-    } else if (tableType == CommonConstants.Helix.TableType.REALTIME) {
+    } else if (tableType == TableType.REALTIME) {
       // Realtime table
-      if (_routingTable.routingTableExists(tableName)) {
+      if (_routingManager.routingExists(tableName)) {
         realtimeTableName = tableName;
       }
     } else {
       // Hybrid table (check both OFFLINE and REALTIME)
       String offlineTableNameToCheck = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
-      if (_routingTable.routingTableExists(offlineTableNameToCheck)) {
+      if (_routingManager.routingExists(offlineTableNameToCheck)) {
         offlineTableName = offlineTableNameToCheck;
       }
       String realtimeTableNameToCheck = TableNameBuilder.REALTIME.tableNameWithType(tableName);
-      if (_routingTable.routingTableExists(realtimeTableNameToCheck)) {
+      if (_routingManager.routingExists(realtimeTableNameToCheck)) {
         realtimeTableName = realtimeTableNameToCheck;
       }
     }
@@ -256,22 +317,39 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     long routingStartTimeNs = System.nanoTime();
     Map<ServerInstance, List<String>> offlineRoutingTable = null;
     Map<ServerInstance, List<String>> realtimeRoutingTable = null;
+    int numUnavailableSegments = 0;
     if (offlineBrokerRequest != null) {
-      offlineRoutingTable = _routingTable.getRoutingTable(new RoutingTableLookupRequest(offlineBrokerRequest));
-      if (offlineRoutingTable.isEmpty()) {
-        LOGGER.debug("No OFFLINE server found for request {}: {}", requestId, query);
+      // NOTE: Routing table might be null if table is just removed
+      RoutingTable routingTable = _routingManager.getRoutingTable(offlineBrokerRequest);
+      if (routingTable != null) {
+        numUnavailableSegments += routingTable.getUnavailableSegments().size();
+        Map<ServerInstance, List<String>> serverInstanceToSegmentsMap = routingTable.getServerInstanceToSegmentsMap();
+        if (!serverInstanceToSegmentsMap.isEmpty()) {
+          offlineRoutingTable = serverInstanceToSegmentsMap;
+        } else {
+          offlineBrokerRequest = null;
+        }
+      } else {
         offlineBrokerRequest = null;
-        offlineRoutingTable = null;
       }
     }
     if (realtimeBrokerRequest != null) {
-      realtimeRoutingTable = _routingTable.getRoutingTable(new RoutingTableLookupRequest(realtimeBrokerRequest));
-      if (realtimeRoutingTable.isEmpty()) {
-        LOGGER.debug("No REALTIME server found for request {}: {}", requestId, query);
+      // NOTE: Routing table might be null if table is just removed
+      RoutingTable routingTable = _routingManager.getRoutingTable(realtimeBrokerRequest);
+      if (routingTable != null) {
+        numUnavailableSegments += routingTable.getUnavailableSegments().size();
+        Map<ServerInstance, List<String>> serverInstanceToSegmentsMap = routingTable.getServerInstanceToSegmentsMap();
+        if (!serverInstanceToSegmentsMap.isEmpty()) {
+          realtimeRoutingTable = serverInstanceToSegmentsMap;
+        } else {
+          realtimeBrokerRequest = null;
+        }
+      } else {
         realtimeBrokerRequest = null;
-        realtimeRoutingTable = null;
       }
     }
+    requestStatistics.setNumUnavailableSegments(numUnavailableSegments);
+
     if (offlineBrokerRequest == null && realtimeBrokerRequest == null) {
       LOGGER.info("No server found for request {}: {}", requestId, query);
       _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.NO_SERVER_FOUND_EXCEPTIONS, 1);
@@ -280,8 +358,31 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     long routingEndTimeNs = System.nanoTime();
     _brokerMetrics.addPhaseTiming(rawTableName, BrokerQueryPhase.QUERY_ROUTING, routingEndTimeNs - routingStartTimeNs);
 
+    // Set timeout in the requests
+    long timeSpentMs = TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
+    // Remaining time in milliseconds for the server query execution
+    // NOTE: For hybrid use case, in most cases offline table and real-time table should have the same query timeout
+    //       configured, but if necessary, we also allow different timeout for them.
+    //       If the timeout is not the same for offline table and real-time table, use the max of offline table
+    //       remaining time and realtime table remaining time. Server side will have different remaining time set for
+    //       each table type, and broker should wait for both types to return.
+    long remainingTimeMs = 0;
+    try {
+      if (offlineBrokerRequest != null) {
+        remainingTimeMs = setQueryTimeout(offlineTableName, offlineBrokerRequest.getQueryOptions(), timeSpentMs);
+      }
+      if (realtimeBrokerRequest != null) {
+        remainingTimeMs = Math.max(remainingTimeMs,
+            setQueryTimeout(realtimeTableName, realtimeBrokerRequest.getQueryOptions(), timeSpentMs));
+      }
+    } catch (TimeoutException e) {
+      String errorMessage = e.getMessage();
+      LOGGER.info("{} {}: {}", errorMessage, requestId, query);
+      _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_TIMEOUT_BEFORE_SCATTERED_EXCEPTIONS, 1);
+      return new BrokerResponseNative(QueryException.getException(QueryException.BROKER_TIMEOUT_ERROR, errorMessage));
+    }
+
     // Execute the query
-    long remainingTimeMs = _brokerTimeoutMs - TimeUnit.NANOSECONDS.toMillis(routingEndTimeNs - compilationStartTimeNs);
     ServerStats serverStats = new ServerStats();
     BrokerResponse brokerResponse =
         processBrokerRequest(requestId, brokerRequest, offlineBrokerRequest, offlineRoutingTable, realtimeBrokerRequest,
@@ -303,18 +404,21 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
 
     LOGGER.debug("Broker Response: {}", brokerResponse);
 
+    // Please keep the format as name=value comma-separated with no spaces
+    // Please add new entries at the end
     if (_queryLogRateLimiter.tryAcquire() || forceLog(brokerResponse, totalTimeMs)) {
       // Table name might have been changed (with suffix _OFFLINE/_REALTIME appended)
-      LOGGER.info("RequestId:{}, table:{}, timeMs:{}, docs:{}/{}, entries:{}/{},"
-              + " segments(queried/processed/matched/consuming):{}/{}/{}/{}, consumingFreshnessTimeMs:{},"
-              + " servers:{}/{}, groupLimitReached:{}, exceptions:{}, serverStats:{}, query:{}", requestId,
+      LOGGER.info("requestId={},table={},timeMs={},docs={}/{},entries={}/{},"
+              + "segments(queried/processed/matched/consuming/unavailable):{}/{}/{}/{}/{},consumingFreshnessTimeMs={},"
+              + "servers={}/{},groupLimitReached={},exceptions={},serverStats={},query={}", requestId,
           brokerRequest.getQuerySource().getTableName(), totalTimeMs, brokerResponse.getNumDocsScanned(),
           brokerResponse.getTotalDocs(), brokerResponse.getNumEntriesScannedInFilter(),
           brokerResponse.getNumEntriesScannedPostFilter(), brokerResponse.getNumSegmentsQueried(),
           brokerResponse.getNumSegmentsProcessed(), brokerResponse.getNumSegmentsMatched(),
-          brokerResponse.getNumConsumingSegmentsQueried(), brokerResponse.getMinConsumingFreshnessTimeMs(),
-          brokerResponse.getNumServersResponded(), brokerResponse.getNumServersQueried(),
-          brokerResponse.isNumGroupsLimitReached(), brokerResponse.getExceptionsSize(), serverStats.getServerStats(),
+          brokerResponse.getNumConsumingSegmentsQueried(), numUnavailableSegments,
+          brokerResponse.getMinConsumingFreshnessTimeMs(), brokerResponse.getNumServersResponded(),
+          brokerResponse.getNumServersQueried(), brokerResponse.isNumGroupsLimitReached(),
+          brokerResponse.getExceptionsSize(), serverStats.getServerStats(),
           StringUtils.substring(query, 0, _queryLogLength));
 
       // Limit the dropping log message at most once per second.
@@ -333,6 +437,341 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
       _numDroppedLog.incrementAndGet();
     }
     return brokerResponse;
+  }
+
+  /**
+   * Check if table is in the format of [database_name].[table_name].
+   *
+   * Only update TableName in QuerySource if there is no existing table in the format of [database_name].[table_name],
+   * but only [table_name].
+   *
+   * @param brokerRequest
+   */
+  private void updateQuerySource(BrokerRequest brokerRequest) {
+    String tableName = brokerRequest.getQuerySource().getTableName();
+    // Check if table is in the format of [database_name].[table_name]
+    String[] tableNameSplits = StringUtils.split(tableName, '.');
+    if (tableNameSplits.length != 2) {
+      return;
+    }
+    // Update table name if there is no existing table in the format of [database_name].[table_name] but only [table_name]
+    if (_enableCaseInsensitive) {
+      if (_tableCache.containsTable(tableNameSplits[1]) && !_tableCache.containsTable(tableName)) {
+        // Use TableCache to check case insensitive table name.
+        brokerRequest.getQuerySource().setTableName(tableNameSplits[1]);
+      }
+      return;
+    }
+    // Use RoutingManager to check case sensitive table name.
+    if (TableNameBuilder.isTableResource(tableName)) {
+      if (_routingManager.routingExists(tableNameSplits[1]) && !_routingManager.routingExists(tableName)) {
+        brokerRequest.getQuerySource().setTableName(tableNameSplits[1]);
+      }
+      return;
+    }
+    if (_routingManager.routingExists(TableNameBuilder.REALTIME.tableNameWithType(tableNameSplits[1]))
+        && !_routingManager.routingExists(TableNameBuilder.REALTIME.tableNameWithType(tableName))) {
+      brokerRequest.getQuerySource().setTableName(tableNameSplits[1]);
+      return;
+    }
+    if (_routingManager.routingExists(TableNameBuilder.OFFLINE.tableNameWithType(tableNameSplits[1]))
+        && !_routingManager.routingExists(TableNameBuilder.OFFLINE.tableNameWithType(tableName))) {
+      brokerRequest.getQuerySource().setTableName(tableNameSplits[1]);
+    }
+  }
+
+  /**
+   * Set Log2m value for DistinctCountHLL Function
+   * @param brokerRequest
+   * @param hllLog2mOverride
+   */
+  static void handleHyperloglogLog2mOverride(BrokerRequest brokerRequest, int hllLog2mOverride) {
+    if (brokerRequest.getAggregationsInfo() != null) {
+      for (AggregationInfo aggregationInfo : brokerRequest.getAggregationsInfo()) {
+        switch (aggregationInfo.getAggregationType().toUpperCase()) {
+          case "DISTINCTCOUNTHLL":
+          case "DISTINCTCOUNTHLLMV":
+          case "DISTINCTCOUNTRAWHLL":
+          case "DISTINCTCOUNTRAWHLLMV":
+            if (aggregationInfo.getExpressionsSize() == 1) {
+              aggregationInfo.addToExpressions(Integer.toString(hllLog2mOverride));
+            }
+        }
+      }
+    }
+    if (brokerRequest.getPinotQuery() != null && brokerRequest.getPinotQuery().getSelectList() != null) {
+      for (Expression expr : brokerRequest.getPinotQuery().getSelectList()) {
+        updateDistinctCountHllExpr(expr, hllLog2mOverride);
+      }
+    }
+  }
+
+  private static void updateDistinctCountHllExpr(Expression expr, int hllLog2mOverride) {
+    Function functionCall = expr.getFunctionCall();
+    if (functionCall == null) {
+      return;
+    }
+    switch (functionCall.getOperator().toUpperCase()) {
+      case "DISTINCTCOUNTHLL":
+      case "DISTINCTCOUNTHLLMV":
+      case "DISTINCTCOUNTRAWHLL":
+      case "DISTINCTCOUNTRAWHLLMV":
+        if (functionCall.getOperandsSize() == 1) {
+          functionCall.addToOperands(RequestUtils.getLiteralExpression(hllLog2mOverride));
+        }
+        return;
+    }
+    if (functionCall.getOperandsSize() > 0) {
+      for (Expression operand : functionCall.getOperands()) {
+        updateDistinctCountHllExpr(operand, hllLog2mOverride);
+      }
+    }
+  }
+
+  /**
+   * Reset limit for selection query if it exceeds maxQuerySelectionLimit.
+   * @param brokerRequest
+   * @param queryLimit
+   *
+   */
+  static void handleQueryLimitOverride(BrokerRequest brokerRequest, int queryLimit) {
+    if (queryLimit > 0) {
+      // Handle GroupBy for BrokerRequest
+      if (brokerRequest.getGroupBy() != null) {
+        if (brokerRequest.getGroupBy().getTopN() > queryLimit) {
+          brokerRequest.getGroupBy().setTopN(queryLimit);
+        }
+      }
+
+      // Handle Selection for BrokerRequest
+      if (brokerRequest.getLimit() > queryLimit) {
+        brokerRequest.setLimit(queryLimit);
+      }
+
+      // Handle Selection & GroupBy for PinotQuery
+      if (brokerRequest.getPinotQuery() != null) {
+        if (brokerRequest.getPinotQuery().getLimit() > queryLimit) {
+          brokerRequest.getPinotQuery().setLimit(queryLimit);
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if a SQL parsed BrokerRequest is a literal only query.
+   * @param brokerRequest
+   * @return true if this query selects only Literals
+   *
+   */
+  @VisibleForTesting
+  static boolean isLiteralOnlyQuery(BrokerRequest brokerRequest) {
+    if (brokerRequest.getPinotQuery() != null) {
+      for (Expression e : brokerRequest.getPinotQuery().getSelectList()) {
+        if (!CalciteSqlParser.isLiteralOnlyExpression(e)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Compute BrokerResponse for literal only query.
+   *
+   * @param brokerRequest
+   * @param compilationStartTimeNs
+   * @param requestStatistics
+   * @return BrokerResponse
+   */
+  private BrokerResponse processLiteralOnlyBrokerRequest(BrokerRequest brokerRequest, long compilationStartTimeNs,
+      RequestStatistics requestStatistics)
+      throws IllegalStateException {
+    BrokerResponseNative brokerResponse = new BrokerResponseNative();
+    List<String> columnNames = new ArrayList<>();
+    List<DataSchema.ColumnDataType> columnTypes = new ArrayList<>();
+    List<Object> row = new ArrayList<>();
+    for (Expression e : brokerRequest.getPinotQuery().getSelectList()) {
+      computeResultsForExpression(e, columnNames, columnTypes, row);
+    }
+    DataSchema dataSchema =
+        new DataSchema(columnNames.toArray(new String[0]), columnTypes.toArray(new DataSchema.ColumnDataType[0]));
+    List<Object[]> rows = new ArrayList<>();
+    rows.add(row.toArray());
+    ResultTable resultTable = new ResultTable(dataSchema, rows);
+    brokerResponse.setResultTable(resultTable);
+
+    long totalTimeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - compilationStartTimeNs);
+    brokerResponse.setTimeUsedMs(totalTimeMs);
+    requestStatistics.setQueryProcessingTime(totalTimeMs);
+    requestStatistics.setStatistics(brokerResponse);
+    return brokerResponse;
+  }
+
+  // TODO(xiangfu): Move Literal function computation here from Calcite Parser.
+  private void computeResultsForExpression(Expression e, List<String> columnNames,
+      List<DataSchema.ColumnDataType> columnTypes, List<Object> row) {
+    if (e.getType() == ExpressionType.LITERAL) {
+      computeResultsForLiteral(e.getLiteral(), columnNames, columnTypes, row);
+    }
+    if (e.getType() == ExpressionType.FUNCTION) {
+      if (e.getFunctionCall().getOperator().equalsIgnoreCase(SqlKind.AS.toString())) {
+        String columnName = e.getFunctionCall().getOperands().get(1).getIdentifier().getName();
+        computeResultsForExpression(e.getFunctionCall().getOperands().get(0), columnNames, columnTypes, row);
+        columnNames.set(columnNames.size() - 1, columnName);
+      } else {
+        throw new IllegalStateException(
+            "No able to compute results for function - " + e.getFunctionCall().getOperator());
+      }
+    }
+  }
+
+  private void computeResultsForLiteral(Literal literal, List<String> columnNames,
+      List<DataSchema.ColumnDataType> columnTypes, List<Object> row) {
+    Object fieldValue = literal.getFieldValue();
+    columnNames.add(fieldValue.toString());
+    switch (literal.getSetField()) {
+      case BOOL_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.STRING);
+        row.add(Boolean.toString(literal.getBoolValue()));
+        break;
+      case BYTE_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.INT);
+        row.add((int) literal.getByteValue());
+        break;
+      case SHORT_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.INT);
+        row.add((int) literal.getShortValue());
+        break;
+      case INT_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.INT);
+        row.add(literal.getIntValue());
+        break;
+      case LONG_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.LONG);
+        row.add(literal.getLongValue());
+        break;
+      case DOUBLE_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.DOUBLE);
+        row.add(literal.getDoubleValue());
+        break;
+      case STRING_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.STRING);
+        row.add(literal.getStringValue());
+        break;
+      case BINARY_VALUE:
+        columnTypes.add(DataSchema.ColumnDataType.BYTES);
+        row.add(BytesUtils.toHexString(literal.getBinaryValue()));
+        break;
+    }
+  }
+
+  /**
+   * Fixes the case-insensitive column names to the actual column names in the given broker request.
+   */
+  private void handleCaseSensitivity(BrokerRequest brokerRequest) {
+    String inputTableName = brokerRequest.getQuerySource().getTableName();
+    String actualTableName = _tableCache.getActualTableName(inputTableName);
+    brokerRequest.getQuerySource().setTableName(actualTableName);
+    //fix columns
+    if (brokerRequest.getFilterSubQueryMap() != null) {
+      Collection<FilterQuery> values = brokerRequest.getFilterSubQueryMap().getFilterQueryMap().values();
+      for (FilterQuery filterQuery : values) {
+        if (filterQuery.getNestedFilterQueryIdsSize() == 0) {
+          String expression = filterQuery.getColumn();
+          filterQuery.setColumn(fixColumnNameCase(actualTableName, expression));
+        }
+      }
+    }
+    if (brokerRequest.isSetAggregationsInfo()) {
+      for (AggregationInfo info : brokerRequest.getAggregationsInfo()) {
+        if (!info.getAggregationType().equalsIgnoreCase(AggregationFunctionType.COUNT.getName())) {
+          // Always read from backward compatible api in AggregationFunctionUtils.
+          List<String> arguments = AggregationFunctionUtils.getArguments(info);
+          arguments.replaceAll(e -> fixColumnNameCase(actualTableName, e));
+          info.setExpressions(arguments);
+        }
+      }
+      if (brokerRequest.isSetGroupBy()) {
+        List<String> expressions = brokerRequest.getGroupBy().getExpressions();
+        for (int i = 0; i < expressions.size(); i++) {
+          expressions.set(i, fixColumnNameCase(actualTableName, expressions.get(i)));
+        }
+      }
+    } else {
+      Selection selection = brokerRequest.getSelections();
+      List<String> selectionColumns = selection.getSelectionColumns();
+      for (int i = 0; i < selectionColumns.size(); i++) {
+        String expression = selectionColumns.get(i);
+        if (!expression.equals("*")) {
+          selectionColumns.set(i, fixColumnNameCase(actualTableName, expression));
+        }
+      }
+    }
+    if (brokerRequest.isSetOrderBy()) {
+      List<SelectionSort> orderBy = brokerRequest.getOrderBy();
+      for (SelectionSort selectionSort : orderBy) {
+        String expression = selectionSort.getColumn();
+        selectionSort.setColumn(fixColumnNameCase(actualTableName, expression));
+      }
+    }
+
+    PinotQuery pinotQuery = brokerRequest.getPinotQuery();
+    if (pinotQuery != null) {
+      pinotQuery.getDataSource().setTableName(actualTableName);
+      for (Expression expression : pinotQuery.getSelectList()) {
+        fixColumnNameCase(actualTableName, expression);
+      }
+      Expression filterExpression = pinotQuery.getFilterExpression();
+      if (filterExpression != null) {
+        fixColumnNameCase(actualTableName, filterExpression);
+      }
+      List<Expression> groupByList = pinotQuery.getGroupByList();
+      if (groupByList != null) {
+        for (Expression expression : groupByList) {
+          fixColumnNameCase(actualTableName, expression);
+        }
+      }
+      List<Expression> orderByList = pinotQuery.getOrderByList();
+      if (orderByList != null) {
+        for (Expression expression : orderByList) {
+          fixColumnNameCase(actualTableName, expression);
+        }
+      }
+      Expression havingExpression = pinotQuery.getHavingExpression();
+      if (havingExpression != null) {
+        fixColumnNameCase(actualTableName, havingExpression);
+      }
+    }
+  }
+
+  private String fixColumnNameCase(String tableNameWithType, String expression) {
+    TransformExpressionTree expressionTree = TransformExpressionTree.compileToExpressionTree(expression);
+    fixColumnNameCase(tableNameWithType, expressionTree);
+    return expressionTree.toString();
+  }
+
+  private void fixColumnNameCase(String tableNameWithType, TransformExpressionTree expression) {
+    TransformExpressionTree.ExpressionType expressionType = expression.getExpressionType();
+    if (expressionType == TransformExpressionTree.ExpressionType.IDENTIFIER) {
+      expression.setValue(_tableCache.getActualColumnName(tableNameWithType, expression.getValue()));
+    } else if (expressionType == TransformExpressionTree.ExpressionType.FUNCTION) {
+      for (TransformExpressionTree child : expression.getChildren()) {
+        fixColumnNameCase(tableNameWithType, child);
+      }
+    }
+  }
+
+  private void fixColumnNameCase(String tableNameWithType, Expression expression) {
+    ExpressionType expressionType = expression.getType();
+    if (expressionType == ExpressionType.IDENTIFIER) {
+      Identifier identifier = expression.getIdentifier();
+      identifier.setName(_tableCache.getActualColumnName(tableNameWithType, identifier.getName()));
+    } else if (expressionType == ExpressionType.FUNCTION) {
+      for (Expression operand : expression.getFunctionCall().getOperands()) {
+        fixColumnNameCase(tableNameWithType, operand);
+      }
+    }
   }
 
   private static Map<String, String> getOptionsFromJson(JsonNode request, String optionsKey) {
@@ -391,11 +830,47 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
     if (queryOptionsFromBrokerRequest != null) {
       queryOptions.putAll(queryOptionsFromBrokerRequest);
     }
+    // NOTE: Always set query options because we will put 'timeoutMs' later
+    brokerRequest.setQueryOptions(queryOptions);
     if (!queryOptions.isEmpty()) {
-      brokerRequest.setQueryOptions(queryOptions);
       LOGGER
           .debug("Query options are set to: {} for request {}: {}", brokerRequest.getQueryOptions(), requestId, query);
     }
+  }
+
+  /**
+   * Sets the query timeout (remaining time in milliseconds) into the query options, and returns the remaining time in
+   * milliseconds.
+   * <p>For the overall query timeout, use query-level timeout (in the query options) if exists, or use table-level
+   * timeout (in the table config) if exists, or use instance-level timeout (in the broker config).
+   */
+  private long setQueryTimeout(String tableNameWithType, Map<String, String> queryOptions, long timeSpentMs)
+      throws TimeoutException {
+    long queryTimeoutMs;
+    Long queryLevelTimeoutMs = QueryOptions.getTimeoutMs(queryOptions);
+    if (queryLevelTimeoutMs != null) {
+      // Use query-level timeout if exists
+      queryTimeoutMs = queryLevelTimeoutMs;
+    } else {
+      Long tableLevelTimeoutMs = _routingManager.getQueryTimeoutMs(tableNameWithType);
+      if (tableLevelTimeoutMs != null) {
+        // Use table-level timeout if exists
+        queryTimeoutMs = tableLevelTimeoutMs;
+      } else {
+        // Use instance-level timeout
+        queryTimeoutMs = _brokerTimeoutMs;
+      }
+    }
+
+    long remainingTimeMs = queryTimeoutMs - timeSpentMs;
+    if (remainingTimeMs <= 0) {
+      String errorMessage = String
+          .format("Query timed out (time spent: %dms, timeout: %dms) for table: %s before scattering the request",
+              timeSpentMs, queryLevelTimeoutMs, tableNameWithType);
+      throw new TimeoutException(errorMessage);
+    }
+    queryOptions.put(Broker.Request.QueryOptionKey.TIMEOUT_MS, Long.toString(remainingTimeMs));
+    return remainingTimeMs;
   }
 
   /**
@@ -511,14 +986,17 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
             // TODO: Explore if DISTINCT should be supported with GROUP BY
             throw new UnsupportedOperationException("DISTINCT with GROUP BY is currently not supported");
           }
+          if (brokerRequest.getLimit() == 0) {
+            // TODO: Consider changing it to SELECTION query for LIMIT 0
+            throw new UnsupportedOperationException("DISTINCT must have positive LIMIT");
+          }
           if (brokerRequest.isSetOrderBy()) {
-            String column = aggregationInfo.getAggregationParams().get(FunctionCallAstNode.COLUMN_KEY_IN_AGGREGATION_INFO);
-            String[] columns = column.split(FunctionCallAstNode.DISTINCT_MULTI_COLUMN_SEPARATOR);
-            Set<String> set = new HashSet<>(Arrays.asList(columns));
+            Set<String> expressionSet = new HashSet<>(AggregationFunctionUtils.getArguments(aggregationInfo));
             List<SelectionSort> orderByColumns = brokerRequest.getOrderBy();
             for (SelectionSort selectionSort : orderByColumns) {
-              if (!set.contains(selectionSort.getColumn())) {
-                throw new UnsupportedOperationException("ORDER By should be only on some/all of the columns passed as arguments to DISTINCT");
+              if (!expressionSet.contains(selectionSort.getColumn())) {
+                throw new UnsupportedOperationException(
+                    "ORDER By should be only on some/all of the columns passed as arguments to DISTINCT");
               }
             }
           }
@@ -532,9 +1010,8 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
    * <code>null</code> if the time boundary service does not have the information.
    */
   private String getTimeColumnName(String offlineTableName) {
-    TimeBoundaryService.TimeBoundaryInfo timeBoundaryInfo =
-        _timeBoundaryService.getTimeBoundaryInfoFor(offlineTableName);
-    return (timeBoundaryInfo != null) ? timeBoundaryInfo.getTimeColumn() : null;
+    TimeBoundaryInfo timeBoundaryInfo = _routingManager.getTimeBoundaryInfo(offlineTableName);
+    return timeBoundaryInfo != null ? timeBoundaryInfo.getTimeColumn() : null;
   }
 
   /**
@@ -567,8 +1044,8 @@ public abstract class BaseBrokerRequestHandler implements BrokerRequestHandler {
    * Helper method to attach time boundary to a broker request.
    */
   private void attachTimeBoundary(String rawTableName, BrokerRequest brokerRequest, boolean isOfflineRequest) {
-    TimeBoundaryService.TimeBoundaryInfo timeBoundaryInfo =
-        _timeBoundaryService.getTimeBoundaryInfoFor(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
+    TimeBoundaryInfo timeBoundaryInfo =
+        _routingManager.getTimeBoundaryInfo(TableNameBuilder.OFFLINE.tableNameWithType(rawTableName));
     if (timeBoundaryInfo == null) {
       LOGGER.warn("Failed to find time boundary info for hybrid table: {}", rawTableName);
       return;

@@ -19,184 +19,247 @@
 package org.apache.pinot.core.query.pruner;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import javax.annotation.Nonnull;
-import org.apache.commons.configuration.Configuration;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.common.request.FilterOperator;
-import org.apache.pinot.common.utils.request.FilterQueryTree;
-import org.apache.pinot.core.common.predicate.RangePredicate;
+import java.util.Set;
+import org.apache.pinot.core.common.DataSource;
+import org.apache.pinot.core.common.DataSourceMetadata;
+import org.apache.pinot.core.data.partition.PartitionFunction;
 import org.apache.pinot.core.indexsegment.IndexSegment;
+import org.apache.pinot.core.query.exception.BadQueryRequestException;
 import org.apache.pinot.core.query.request.ServerQueryRequest;
-import org.apache.pinot.core.segment.index.ColumnMetadata;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.FilterContext;
+import org.apache.pinot.core.query.request.context.predicate.EqPredicate;
+import org.apache.pinot.core.query.request.context.predicate.Predicate;
+import org.apache.pinot.core.query.request.context.predicate.RangePredicate;
 import org.apache.pinot.core.segment.index.readers.BloomFilterReader;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.BytesUtils;
 
 
 /**
- * An implementation of SegmentPruner.
- * <p>Pruner will prune segment based on the column value inside the filter.
+ * The {@code ColumnValueSegmentPruner} is the segment pruner that prunes segments based on the value inside the filter.
+ * <ul>
+ *   <li>
+ *     For EQUALITY filter, prune the segment based on:
+ *     <ul>
+ *       <li>Column min/max value</li>
+ *       <li>Column partition</li>
+ *       <li>Column bloom filter</li>
+ *     </ul>
+ *   </li>
+ *   <li>
+ *     For RANGE filter, prune the segment based on:
+ *     <ul>
+ *       <li>Column min/max value<</li>
+ *     </ul>
+ *   </li>
+ * </ul>
  */
-public class ColumnValueSegmentPruner extends AbstractSegmentPruner {
+@SuppressWarnings({"rawtypes", "unchecked"})
+public class ColumnValueSegmentPruner implements SegmentPruner {
 
   @Override
-  public void init(Configuration config) {
+  public void init(PinotConfiguration config) {
   }
 
   @Override
-  public boolean prune(@Nonnull IndexSegment segment, @Nonnull ServerQueryRequest queryRequest) {
-    FilterQueryTree filterQueryTree = queryRequest.getFilterQueryTree();
-    if (filterQueryTree == null) {
+  public boolean prune(IndexSegment segment, ServerQueryRequest queryRequest) {
+    FilterContext filter = queryRequest.getQueryContext().getFilter();
+    if (filter == null) {
       return false;
     }
-    // For realtime segment, this map can be null.
-    Map<String, ColumnMetadata> columnMetadataMap =
-        ((SegmentMetadataImpl) segment.getSegmentMetadata()).getColumnMetadataMap();
 
-    Map<String, BloomFilterReader> bloomFilterMap = new HashMap<>();
-    if (columnMetadataMap != null) {
-      for (String column : columnMetadataMap.keySet()) {
-        BloomFilterReader bloomFilterReader = segment.getDataSource(column).getBloomFilter();
-        if (bloomFilterReader != null) {
-          bloomFilterMap.put(column, bloomFilterReader);
-        }
-      }
-    }
-    return (columnMetadataMap != null) && pruneSegment(filterQueryTree, columnMetadataMap, bloomFilterMap);
+    // This map caches the data sources
+    Map<String, DataSource> dataSourceCache = new HashMap<>();
+    return pruneSegment(segment, filter, dataSourceCache);
   }
 
-  @Override
-  public String toString() {
-    return "ColumnValueSegmentPruner";
+  private boolean pruneSegment(IndexSegment segment, FilterContext filter, Map<String, DataSource> dataSourceCache) {
+    switch (filter.getType()) {
+      case AND:
+        for (FilterContext child : filter.getChildren()) {
+          if (pruneSegment(segment, child, dataSourceCache)) {
+            return true;
+          }
+        }
+        return false;
+      case OR:
+        for (FilterContext child : filter.getChildren()) {
+          if (!pruneSegment(segment, child, dataSourceCache)) {
+            return false;
+          }
+        }
+        return true;
+      case PREDICATE:
+        Predicate predicate = filter.getPredicate();
+        // Only prune columns
+        if (predicate.getLhs().getType() != ExpressionContext.Type.IDENTIFIER) {
+          return false;
+        }
+        Predicate.Type predicateType = predicate.getType();
+        if (predicateType == Predicate.Type.EQ) {
+          return pruneEqPredicate(segment, (EqPredicate) predicate, dataSourceCache);
+        } else if (predicateType == Predicate.Type.RANGE) {
+          return pruneRangePredicate(segment, (RangePredicate) predicate, dataSourceCache);
+        } else {
+          return false;
+        }
+      default:
+        throw new IllegalStateException();
+    }
   }
 
   /**
-   * Helper method to determine if a segment can be pruned based on the column min/max value in segment metadata and
-   * the predicates on time column. The algorithm is as follows:
-   *
+   * For EQ predicate, prune the segment based on:
    * <ul>
-   *   <li> For leaf node: Returns true if there is a predicate on the column and apply the predicate would result in
-   *   filtering out all docs of the segment, false otherwise. </li>
-   *   <li> For non-leaf AND node: True if any of its children returned true, false otherwise. </li>
-   *   <li> For non-leaf OR node: True if all its children returned true, false otherwise. </li>
+   *   <li>Column min/max value</li>
+   *   <li>Column partition</li>
+   *   <li>Column bloom filter</li>
    * </ul>
-   *
-   * @param filterQueryTree Filter tree for the query.
-   * @param columnMetadataMap Map from column name to column metadata.
-   * @return True if segment can be pruned out, false otherwise.
    */
-  @SuppressWarnings("unchecked")
-  @Override
-  public boolean pruneSegment(@Nonnull FilterQueryTree filterQueryTree,
-      @Nonnull Map<String, ColumnMetadata> columnMetadataMap, Map<String, BloomFilterReader> bloomFilterMap) {
-    FilterOperator filterOperator = filterQueryTree.getOperator();
-    List<FilterQueryTree> children = filterQueryTree.getChildren();
+  private boolean pruneEqPredicate(IndexSegment segment, EqPredicate eqPredicate,
+      Map<String, DataSource> dataSourceCache) {
+    String column = eqPredicate.getLhs().getIdentifier();
+    DataSource dataSource = dataSourceCache.computeIfAbsent(column, segment::getDataSource);
+    // NOTE: Column must exist after DataSchemaSegmentPruner
+    assert dataSource != null;
+    DataSourceMetadata dataSourceMetadata = dataSource.getDataSourceMetadata();
+    Comparable value = convertValue(eqPredicate.getValue(), dataSourceMetadata.getDataType());
 
-    if (children == null || children.isEmpty()) {
-      // Leaf Node
-
-      //skip expressions
-      if(filterQueryTree.getExpression()!= null && !filterQueryTree.getExpression().isColumn()){
-        return false;
-      }
-      // Skip operator other than EQUALITY and RANGE
-      if ((filterOperator != FilterOperator.EQUALITY) && (filterOperator != FilterOperator.RANGE)) {
-        return false;
-      }
-
-      String column = filterQueryTree.getColumn();
-      ColumnMetadata columnMetadata = columnMetadataMap.get(column);
-      if (columnMetadata == null) {
-        // Should not reach here after DataSchemaSegmentPruner
+    // Check min/max value
+    Comparable minValue = dataSourceMetadata.getMinValue();
+    if (minValue != null) {
+      if (value.compareTo(minValue) < 0) {
         return true;
       }
-
-      Comparable minValue = columnMetadata.getMinValue();
-      Comparable maxValue = columnMetadata.getMaxValue();
-
-      if (filterOperator == FilterOperator.EQUALITY) {
-        // EQUALITY
-        boolean pruneSegment = false;
-        FieldSpec.DataType dataType = columnMetadata.getDataType();
-        Comparable value = getValue(filterQueryTree.getValue().get(0), dataType);
-
-        // Check if the value is in the min/max range
-        if (minValue != null && maxValue != null) {
-          pruneSegment = (value.compareTo(minValue) < 0) || (value.compareTo(maxValue) > 0);
-        }
-
-        // If the bloom filter is available for the column, check if the value may exist
-        if (!pruneSegment && bloomFilterMap.containsKey(column)) {
-          BloomFilterReader bloomFilterReader = bloomFilterMap.get(column);
-          pruneSegment = !bloomFilterReader.mightContain(value);
-        }
-
-        return pruneSegment;
-      } else {
-        // RANGE
-
-        // Get lower/upper boundary value
-        FieldSpec.DataType dataType = columnMetadata.getDataType();
-        RangePredicate rangePredicate = new RangePredicate(null, filterQueryTree.getValue());
-        String lowerBoundary = rangePredicate.getLowerBoundary();
-        boolean includeLowerBoundary = rangePredicate.includeLowerBoundary();
-        Comparable lowerBoundaryValue = null;
-        if (!lowerBoundary.equals(RangePredicate.UNBOUNDED)) {
-          lowerBoundaryValue = getValue(lowerBoundary, dataType);
-        }
-        String upperBoundary = rangePredicate.getUpperBoundary();
-        boolean includeUpperBoundary = rangePredicate.includeUpperBoundary();
-        Comparable upperBoundaryValue = null;
-        if (!upperBoundary.equals(RangePredicate.UNBOUNDED)) {
-          upperBoundaryValue = getValue(upperBoundary, dataType);
-        }
-
-        // Check if the range is valid
-        if ((lowerBoundaryValue != null) && (upperBoundaryValue != null)) {
-          if (includeLowerBoundary && includeUpperBoundary) {
-            if (lowerBoundaryValue.compareTo(upperBoundaryValue) > 0) {
-              return true;
-            }
-          } else {
-            if (lowerBoundaryValue.compareTo(upperBoundaryValue) >= 0) {
-              return true;
-            }
-          }
-        }
-
-        // Doesn't have min/max value set in metadata
-        if ((minValue == null) || (maxValue == null)) {
-          return false;
-        }
-
-        if (lowerBoundaryValue != null) {
-          if (includeLowerBoundary) {
-            if (lowerBoundaryValue.compareTo(maxValue) > 0) {
-              return true;
-            }
-          } else {
-            if (lowerBoundaryValue.compareTo(maxValue) >= 0) {
-              return true;
-            }
-          }
-        }
-        if (upperBoundaryValue != null) {
-          if (includeUpperBoundary) {
-            if (upperBoundaryValue.compareTo(minValue) < 0) {
-              return true;
-            }
-          } else {
-            if (upperBoundaryValue.compareTo(minValue) <= 0) {
-              return true;
-            }
-          }
-        }
-        return false;
+    }
+    Comparable maxValue = dataSourceMetadata.getMaxValue();
+    if (maxValue != null) {
+      if (value.compareTo(maxValue) > 0) {
+        return true;
       }
-    } else {
-      // Parent node
-      return pruneNonLeaf(filterQueryTree, columnMetadataMap, bloomFilterMap);
+    }
+
+    // Check column partition
+    PartitionFunction partitionFunction = dataSourceMetadata.getPartitionFunction();
+    if (partitionFunction != null) {
+      Set<Integer> partitions = dataSourceMetadata.getPartitions();
+      assert partitions != null;
+      if (!partitions.contains(partitionFunction.getPartition(value))) {
+        return true;
+      }
+    }
+
+    // Check bloom filter
+    BloomFilterReader bloomFilter = dataSource.getBloomFilter();
+    if (bloomFilter != null) {
+      if (!bloomFilter.mightContain(value)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * For RANGE predicate, prune the segment based on:
+   * <ul>
+   *   <li>Column min/max value</li>
+   * </ul>
+   */
+  private boolean pruneRangePredicate(IndexSegment segment, RangePredicate rangePredicate,
+      Map<String, DataSource> dataSourceCache) {
+    String column = rangePredicate.getLhs().getIdentifier();
+    DataSource dataSource = dataSourceCache.computeIfAbsent(column, segment::getDataSource);
+    // NOTE: Column must exist after DataSchemaSegmentPruner
+    assert dataSource != null;
+    DataSourceMetadata dataSourceMetadata = dataSource.getDataSourceMetadata();
+
+    // Get lower/upper boundary value
+    DataType dataType = dataSourceMetadata.getDataType();
+    String lowerBound = rangePredicate.getLowerBound();
+    Comparable lowerBoundValue = null;
+    if (!lowerBound.equals(RangePredicate.UNBOUNDED)) {
+      lowerBoundValue = convertValue(lowerBound, dataType);
+    }
+    boolean lowerInclusive = rangePredicate.isLowerInclusive();
+    String upperBound = rangePredicate.getUpperBound();
+    Comparable upperBoundValue = null;
+    if (!upperBound.equals(RangePredicate.UNBOUNDED)) {
+      upperBoundValue = convertValue(upperBound, dataType);
+    }
+    boolean upperInclusive = rangePredicate.isUpperInclusive();
+
+    // Check if the range is valid
+    // TODO: This check should be performed on the broker
+    if (lowerBoundValue != null && upperBoundValue != null) {
+      if (lowerInclusive && upperInclusive) {
+        if (lowerBoundValue.compareTo(upperBoundValue) > 0) {
+          return true;
+        }
+      } else {
+        if (lowerBoundValue.compareTo(upperBoundValue) >= 0) {
+          return true;
+        }
+      }
+    }
+
+    // Check min/max value
+    Comparable minValue = dataSourceMetadata.getMinValue();
+    if (minValue != null) {
+      if (upperBoundValue != null) {
+        if (upperInclusive) {
+          if (upperBoundValue.compareTo(minValue) < 0) {
+            return true;
+          }
+        } else {
+          if (upperBoundValue.compareTo(minValue) <= 0) {
+            return true;
+          }
+        }
+      }
+    }
+    Comparable maxValue = dataSourceMetadata.getMaxValue();
+    if (maxValue != null) {
+      if (lowerBoundValue != null) {
+        if (lowerInclusive) {
+          if (lowerBoundValue.compareTo(maxValue) > 0) {
+            return true;
+          }
+        } else {
+          if (lowerBoundValue.compareTo(maxValue) >= 0) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private static Comparable convertValue(String stringValue, DataType dataType) {
+    try {
+      switch (dataType) {
+        case INT:
+          return Integer.valueOf(stringValue);
+        case LONG:
+          return Long.valueOf(stringValue);
+        case FLOAT:
+          return Float.valueOf(stringValue);
+        case DOUBLE:
+          return Double.valueOf(stringValue);
+        case STRING:
+          return stringValue;
+        case BYTES:
+          return BytesUtils.toByteArray(stringValue);
+        default:
+          throw new IllegalStateException();
+      }
+    } catch (Exception e) {
+      throw new BadQueryRequestException(String.format("Cannot convert value: '%s' to type: %s", stringValue, dataType),
+          e);
     }
   }
 }

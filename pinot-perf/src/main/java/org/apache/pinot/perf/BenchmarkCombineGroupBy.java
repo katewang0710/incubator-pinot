@@ -19,9 +19,7 @@
 package org.apache.pinot.perf;
 
 import com.google.common.base.Joiner;
-import com.google.common.collect.Lists;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -38,18 +36,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.RandomStringUtils;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.GroupBy;
-import org.apache.pinot.common.request.SelectionSort;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.data.table.ConcurrentIndexedTable;
 import org.apache.pinot.core.data.table.IndexedTable;
-import org.apache.pinot.core.data.table.Key;
 import org.apache.pinot.core.data.table.Record;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
-import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
 import org.apache.pinot.core.query.aggregation.groupby.AggregationGroupByTrimmingService;
 import org.apache.pinot.core.query.aggregation.groupby.GroupKeyGenerator;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.query.utils.Pair;
 import org.apache.pinot.core.util.GroupByUtils;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -78,12 +74,9 @@ public class BenchmarkCombineGroupBy {
   private static final int CARDINALITY_D2 = 500;
   private Random _random = new Random();
 
-  private DataSchema _dataSchema;
-  private List<AggregationInfo> _aggregationInfos;
-  private GroupBy _groupBy;
+  private QueryContext _queryContext;
   private AggregationFunction[] _aggregationFunctions;
-  private List<SelectionSort> _orderBy;
-  private int _numAggregationFunctions;
+  private DataSchema _dataSchema;
 
   private List<String> _d1;
   private List<Integer> _d2;
@@ -106,36 +99,11 @@ public class BenchmarkCombineGroupBy {
       _d2.add(i);
     }
 
+    _queryContext = QueryContextConverterUtils
+        .getQueryContextFromPQL("SELECT sum(m1), max(m2) FROM testTable GROUP BY d1, d2 ORDER BY sum(m1) TOP 500");
+    _aggregationFunctions = AggregationFunctionUtils.getAggregationFunctions(_queryContext);
     _dataSchema = new DataSchema(new String[]{"d1", "d2", "sum(m1)", "max(m2)"},
-        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING, DataSchema.ColumnDataType.INT,
-            DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE});
-
-    AggregationInfo agg1 = new AggregationInfo();
-    Map<String, String> params1 = new HashMap<>();
-    params1.put("column", "m1");
-    agg1.setAggregationParams(params1);
-    agg1.setAggregationType("sum");
-    AggregationInfo agg2 = new AggregationInfo();
-    Map<String, String> params2 = new HashMap<>();
-    params2.put("column", "m2");
-    agg2.setAggregationParams(params2);
-    agg2.setAggregationType("max");
-    _aggregationInfos = Lists.newArrayList(agg1, agg2);
-
-    _numAggregationFunctions = 2;
-    _aggregationFunctions = new AggregationFunction[_numAggregationFunctions];
-    for (int i = 0; i < _numAggregationFunctions; i++) {
-      _aggregationFunctions[i] = AggregationFunctionFactory.getAggregationFunction(_aggregationInfos.get(i), null);
-    }
-
-    _groupBy = new GroupBy();
-    _groupBy.setTopN(TOP_N);
-    _groupBy.setExpressions(Lists.newArrayList("d1", "d2"));
-
-    SelectionSort orderBy = new SelectionSort();
-    orderBy.setColumn("sum(m1)");
-    orderBy.setIsAsc(true);
-    _orderBy = Lists.newArrayList(orderBy);
+        new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING, DataSchema.ColumnDataType.INT, DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE});
 
     _executorService = Executors.newFixedThreadPool(10);
   }
@@ -162,13 +130,13 @@ public class BenchmarkCombineGroupBy {
   @Benchmark
   @BenchmarkMode(Mode.AverageTime)
   @OutputTimeUnit(TimeUnit.MICROSECONDS)
-  public void concurrentIndexedTableForCombineGroupBy() throws InterruptedException, ExecutionException, TimeoutException {
-
-    int capacity = GroupByUtils.getTableCapacity(_groupBy, _orderBy);
+  public void concurrentIndexedTableForCombineGroupBy()
+      throws InterruptedException, ExecutionException, TimeoutException {
+    int capacity = GroupByUtils.getTableCapacity(_queryContext);
 
     // make 1 concurrent table
     IndexedTable concurrentIndexedTable =
-        new ConcurrentIndexedTable(_dataSchema, _aggregationInfos, _orderBy, capacity);
+        new ConcurrentIndexedTable(_dataSchema, _aggregationFunctions, _queryContext.getOrderByExpressions(), capacity);
 
     List<Callable<Void>> innerSegmentCallables = new ArrayList<>(NUM_SEGMENTS);
 
@@ -194,11 +162,11 @@ public class BenchmarkCombineGroupBy {
     concurrentIndexedTable.finish(false);
   }
 
-
   @Benchmark
   @BenchmarkMode(Mode.AverageTime)
   @OutputTimeUnit(TimeUnit.MICROSECONDS)
-  public void originalCombineGroupBy() throws InterruptedException, TimeoutException, ExecutionException {
+  public void originalCombineGroupBy()
+      throws InterruptedException, TimeoutException, ExecutionException {
 
     AtomicInteger numGroups = new AtomicInteger();
     int _interSegmentNumGroupsLimit = 200_000;
@@ -214,15 +182,14 @@ public class BenchmarkCombineGroupBy {
           final Object[] value = newRecordOriginal.getSecond();
 
           resultsMap.compute(stringKey, (k, v) -> {
+            int numAggregationFunctions = _aggregationFunctions.length;
             if (v == null) {
               if (numGroups.getAndIncrement() < _interSegmentNumGroupsLimit) {
-                v = new Object[_numAggregationFunctions];
-                for (int j = 0; j < _numAggregationFunctions; j++) {
-                  v[j] = value[j];
-                }
+                v = new Object[numAggregationFunctions];
+                System.arraycopy(value, 0, v, 0, numAggregationFunctions);
               }
             } else {
-              for (int j = 0; j < _numAggregationFunctions; j++) {
+              for (int j = 0; j < numAggregationFunctions; j++) {
                 v[j] = _aggregationFunctions[j].merge(v[j], value[j]);
               }
             }
@@ -244,13 +211,11 @@ public class BenchmarkCombineGroupBy {
     List<Map<String, Object>> trimmedResults = aggregationGroupByTrimmingService.trimIntermediateResultsMap(resultsMap);
   }
 
-  public static void main(String[] args) throws Exception {
-    ChainedOptionsBuilder opt = new OptionsBuilder().include(BenchmarkCombineGroupBy.class.getSimpleName())
-        .warmupTime(TimeValue.seconds(10))
-        .warmupIterations(1)
-        .measurementTime(TimeValue.seconds(30))
-        .measurementIterations(3)
-        .forks(1);
+  public static void main(String[] args)
+      throws Exception {
+    ChainedOptionsBuilder opt =
+        new OptionsBuilder().include(BenchmarkCombineGroupBy.class.getSimpleName()).warmupTime(TimeValue.seconds(10))
+            .warmupIterations(1).measurementTime(TimeValue.seconds(30)).measurementIterations(3).forks(1);
 
     new Runner(opt.build()).run();
   }

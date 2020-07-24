@@ -33,7 +33,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.List;
+import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
@@ -66,6 +69,12 @@ public class JsonUtils {
   public static <T> T fileToObject(File jsonFile, Class<T> valueType)
       throws IOException {
     return DEFAULT_READER.forType(valueType).readValue(jsonFile);
+  }
+
+  public static <T> List<T> fileToList(File jsonFile, Class<T> valueType)
+      throws IOException {
+    return DEFAULT_READER.forType(
+            DEFAULT_MAPPER.getTypeFactory().constructCollectionType(List.class, valueType)).readValue(jsonFile);
   }
 
   public static JsonNode fileToJsonNode(File jsonFile)
@@ -174,8 +183,27 @@ public class JsonUtils {
         return jsonValue.asDouble();
       case STRING:
         return jsonValue.asText();
+      case BYTES:
+        try {
+          return jsonValue.binaryValue();
+        } catch (IOException e) {
+          throw new IllegalArgumentException("Failed to extract binary value");
+        }
       default:
-        throw new IllegalArgumentException();
+        throw new IllegalArgumentException(String.format("Unsupported data type %s", dataType));
+    }
+  }
+
+  /**
+   * Converts from a GenericRecord to a json map
+   */
+  public static Map<String, Object> genericRecordToJson(GenericRecord genericRecord) {
+    try {
+      String jsonString = genericRecord.toString();
+      return DEFAULT_MAPPER.readValue(jsonString, new TypeReference<Map<String, Object>>() {
+      });
+    } catch (IOException e) {
+      throw new IllegalStateException("Caught exception when converting generic record " + genericRecord + " to JSON");
     }
   }
 }

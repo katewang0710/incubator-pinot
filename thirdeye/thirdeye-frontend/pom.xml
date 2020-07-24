@@ -2,24 +2,25 @@
 <project
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
   xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
   <modelVersion>4.0.0</modelVersion>
-  <parent>
-    <groupId>org.apache.pinot.thirdeye</groupId>
-    <artifactId>thirdeye</artifactId>
-    <version>1.0-SNAPSHOT</version>
-  </parent>
   <groupId>org.apache.pinot.thirdeye</groupId>
   <artifactId>thirdeye-frontend</artifactId>
+  <version>${revision}${sha1}</version>
   <name>thirdeye-frontend</name>
   <url>http://maven.apache.org</url>
+
+  <properties>
+    <revision>1.0.0</revision>
+    <sha1>-SNAPSHOT</sha1>
+  </properties>
 
   <build>
     <plugins>
       <plugin>
         <groupId>com.github.eirslett</groupId>
         <artifactId>frontend-maven-plugin</artifactId>
-        <version>1.6</version>
-
+        <version>1.9.1</version>
         <executions>
           <execution>
             <id>install node and npm</id>
@@ -29,7 +30,26 @@
             </goals>
             <configuration>
               <nodeVersion>v10.16.3</nodeVersion>
-              <yarnVersion>v1.12.0</yarnVersion>
+              <yarnVersion>v1.22.4</yarnVersion>
+            </configuration>
+          </execution>
+          <execution>
+            <id>yarn config</id>
+            <goals>
+              <goal>yarn</goal>
+            </goals>
+            <configuration>
+              <!-- ensure that it uses packages from open source NPM -->
+              <arguments>config set registry http://registry.npmjs.org/</arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>yarn list config</id>
+            <goals>
+              <goal>yarn</goal>
+            </goals>
+            <configuration>
+              <arguments>config list</arguments>
             </configuration>
           </execution>
           <execution>
@@ -43,12 +63,6 @@
             </configuration>
           </execution>
           <execution>
-            <id>bower install</id>
-            <goals>
-              <goal>bower</goal>
-            </goals>
-          </execution>
-          <execution>
             <id>build front end</id>
             <phase>generate-resources</phase>
             <goals>
@@ -58,6 +72,7 @@
               <environmentalVariables>
                 <JOBS>1</JOBS>
               </environmentalVariables>
+              <!-- Used for local build only -->
               <arguments>run build --prod --output-path=../thirdeye-pinot/src/main/resources/app</arguments>
             </configuration>
           </execution>
@@ -98,9 +113,6 @@
                 <fileset>
                   <directory>node_modules</directory>
                 </fileset>
-                <fileset>
-                  <directory>bower_components</directory>
-                </fileset>
               </filesets>
             </configuration>
           </execution>
@@ -120,7 +132,7 @@
           <exclude>**/.gitkeep</exclude>
           <exclude>testem.js</exclude>
         </excludes>
-        <targetPath>META-INF/resources/</targetPath>
+        <targetPath>app/</targetPath>
       </resource>
     </resources>
 

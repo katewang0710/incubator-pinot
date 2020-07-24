@@ -24,16 +24,20 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.pinot.common.config.TableNameBuilder;
 import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.metrics.BrokerTimer;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.response.broker.QueryProcessingException;
+import org.apache.pinot.common.response.broker.ResultTable;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataTable;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.BrokerRequestToQueryContextConverter;
 import org.apache.pinot.core.transport.ServerRoutingInstance;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 
 
 /**
@@ -60,7 +64,7 @@ public class BrokerReduceService {
     long numSegmentsMatched = 0L;
     long numConsumingSegmentsProcessed = 0L;
     long minConsumingFreshnessTimeMs = Long.MAX_VALUE;
-    long numTotalRawDocs = 0L;
+    long numTotalDocs = 0L;
     boolean numGroupsLimitReached = false;
 
     // Cache a data schema from data tables (try to cache one with data rows associated with it).
@@ -124,9 +128,9 @@ public class BrokerReduceService {
             Math.min(Long.parseLong(minConsumingFreshnessTimeMsString), minConsumingFreshnessTimeMs);
       }
 
-      String numTotalRawDocsString = metadata.get(DataTable.TOTAL_DOCS_METADATA_KEY);
-      if (numTotalRawDocsString != null) {
-        numTotalRawDocs += Long.parseLong(numTotalRawDocsString);
+      String numTotalDocsString = metadata.get(DataTable.TOTAL_DOCS_METADATA_KEY);
+      if (numTotalDocsString != null) {
+        numTotalDocs += Long.parseLong(numTotalDocsString);
       }
       numGroupsLimitReached |= Boolean.parseBoolean(metadata.get(DataTable.NUM_GROUPS_LIMIT_REACHED_KEY));
 
@@ -154,7 +158,7 @@ public class BrokerReduceService {
     brokerResponseNative.setNumSegmentsQueried(numSegmentsQueried);
     brokerResponseNative.setNumSegmentsProcessed(numSegmentsProcessed);
     brokerResponseNative.setNumSegmentsMatched(numSegmentsMatched);
-    brokerResponseNative.setTotalDocs(numTotalRawDocs);
+    brokerResponseNative.setTotalDocs(numTotalDocs);
     brokerResponseNative.setNumGroupsLimitReached(numGroupsLimitReached);
     if (numConsumingSegmentsProcessed > 0) {
       brokerResponseNative.setNumConsumingSegmentsQueried(numConsumingSegmentsProcessed);
@@ -177,8 +181,42 @@ public class BrokerReduceService {
       }
     }
 
-    DataTableReducer dataTableReducer = ResultReducerFactory.getResultReducer(brokerRequest);
-    dataTableReducer.reduceAndSetResults(tableName, cachedDataSchema, dataTableMap, brokerResponseNative, brokerMetrics);
+    // NOTE: When there is no cached data schema, that means all servers encountered exception. In such case, return the
+    //       response with metadata only.
+    if (cachedDataSchema == null) {
+      return brokerResponseNative;
+    }
+
+    QueryContext queryContext = BrokerRequestToQueryContextConverter.convert(brokerRequest);
+    DataTableReducer dataTableReducer = ResultReducerFactory.getResultReducer(queryContext);
+    dataTableReducer
+        .reduceAndSetResults(tableName, cachedDataSchema, dataTableMap, brokerResponseNative, brokerMetrics);
+    updateAlias(queryContext, brokerResponseNative);
     return brokerResponseNative;
+  }
+
+  private static void updateAlias(QueryContext queryContext, BrokerResponseNative brokerResponseNative) {
+    ResultTable resultTable = brokerResponseNative.getResultTable();
+    if (resultTable == null) {
+      return;
+    }
+    Map<ExpressionContext, String> aliasMap = queryContext.getAliasMap();
+    if (aliasMap.isEmpty()) {
+      return;
+    }
+
+    String[] columnNames = resultTable.getDataSchema().getColumnNames();
+    List<ExpressionContext> selectExpressions = queryContext.getSelectExpressions();
+    int numSelectExpressions = selectExpressions.size();
+    // For query like `SELECT *`, we skip alias update.
+    if (columnNames.length != numSelectExpressions) {
+      return;
+    }
+    for (int i = 0; i < numSelectExpressions; i++) {
+      String alias = aliasMap.get(selectExpressions.get(i));
+      if (alias != null) {
+        columnNames[i] = alias;
+      }
+    }
   }
 }

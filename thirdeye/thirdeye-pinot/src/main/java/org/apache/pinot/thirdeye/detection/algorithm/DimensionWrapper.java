@@ -34,6 +34,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.commons.collections4.MapUtils;
+import org.apache.pinot.thirdeye.common.utils.MetricUtils;
 import org.apache.pinot.thirdeye.dataframe.DataFrame;
 import org.apache.pinot.thirdeye.dataframe.util.MetricSlice;
 import org.apache.pinot.thirdeye.datalayer.dto.DatasetConfigDTO;
@@ -51,6 +52,7 @@ import org.apache.pinot.thirdeye.detection.DetectionUtils;
 import org.apache.pinot.thirdeye.detection.PredictionResult;
 import org.apache.pinot.thirdeye.detection.cache.CacheConfig;
 import org.apache.pinot.thirdeye.detection.spi.exception.DetectorDataInsufficientException;
+import org.apache.pinot.thirdeye.detection.spi.model.AnomalySlice;
 import org.apache.pinot.thirdeye.rootcause.impl.MetricEntity;
 import org.apache.pinot.thirdeye.util.ThirdEyeUtils;
 import org.joda.time.DateTime;
@@ -99,7 +101,9 @@ public class DimensionWrapper extends DetectionPipeline {
   private final double minContribution;
   private final double minValue;
   private final double minValueHourly;
+  private final double maxValueHourly;
   private final double minValueDaily;
+  private final double maxValueDaily;
   private final double minLiveZone;
   private final double liveBucketPercentageThreshold;
   private final Period lookback;
@@ -120,10 +124,13 @@ public class DimensionWrapper extends DetectionPipeline {
 
     // the metric used in dimension exploration
     this.metricUrn = MapUtils.getString(config.getProperties(), "metricUrn", null);
+
     this.minContribution = MapUtils.getDoubleValue(config.getProperties(), "minContribution", Double.NaN);
     this.minValue = MapUtils.getDoubleValue(config.getProperties(), "minValue", Double.NaN);
     this.minValueHourly = MapUtils.getDoubleValue(config.getProperties(), "minValueHourly", Double.NaN);
+    this.maxValueHourly = MapUtils.getDoubleValue(config.getProperties(), "maxValueHourly", Double.NaN);
     this.minValueDaily = MapUtils.getDoubleValue(config.getProperties(), "minValueDaily", Double.NaN);
+    this.maxValueDaily = MapUtils.getDoubleValue(config.getProperties(), "maxValueDaily", Double.NaN);
     this.k = MapUtils.getIntValue(config.getProperties(), "k", -1);
     this.dimensions = ConfigUtils.getList(config.getProperties().get("dimensions"));
     this.lookback = ConfigUtils.parsePeriod(MapUtils.getString(config.getProperties(), "lookback", "1w"));
@@ -166,9 +173,16 @@ public class DimensionWrapper extends DetectionPipeline {
       Period testPeriod = new Period(this.start, this.end);
 
       MetricEntity metric = MetricEntity.fromURN(this.metricUrn);
+      MetricConfigDTO metricConfig = this.provider.fetchMetrics(Collections.singleton(metric.getId())).get(metric.getId());
       MetricSlice slice = MetricSlice.from(metric.getId(), this.start.getMillis(), this.end.getMillis(), metric.getFilters());
 
-      DataFrame aggregates = this.provider.fetchAggregates(Collections.singletonList(slice), this.dimensions).get(slice);
+      // We can push down the top k filter if min contribution is not defined.
+      // Otherwise it is not accurate to calculate the contribution.
+      int limit = -1;
+      if (Double.isNaN(this.minContribution) && this.k > 0) {
+        limit = this.k;
+      }
+      DataFrame aggregates = this.provider.fetchAggregates(Collections.singletonList(slice), this.dimensions, limit).get(slice);
 
       if (aggregates.isEmpty()) {
         return nestedMetrics;
@@ -187,14 +201,25 @@ public class DimensionWrapper extends DetectionPipeline {
         aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).gte(this.minValue)).dropNull();
       }
 
+      double hourlyMultiplier = MetricUtils.isAggCumulative(metricConfig) ?
+          (TimeUnit.HOURS.toMillis(1) / (double) testPeriod.toDurationFrom(start).getMillis()) : 1.0;
+      double dailyMultiplier = MetricUtils.isAggCumulative(metricConfig) ?
+              (TimeUnit.DAYS.toMillis(1) / (double) testPeriod.toDurationFrom(start).getMillis()) : 1.0;
+
       if (!Double.isNaN(this.minValueHourly)) {
-        double multiplier = TimeUnit.HOURS.toMillis(1) / (double) testPeriod.toDurationFrom(start).getMillis();
-        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(multiplier).gte(this.minValueHourly)).dropNull();
+        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(hourlyMultiplier).gte(this.minValueHourly)).dropNull();
+      }
+
+      if (!Double.isNaN(this.maxValueHourly)) {
+        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(hourlyMultiplier).lte(this.maxValueHourly)).dropNull();
       }
 
       if (!Double.isNaN(this.minValueDaily)) {
-        double multiplier = TimeUnit.DAYS.toMillis(1) / (double) testPeriod.toDurationFrom(start).getMillis();
-        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(multiplier).gte(this.minValueDaily)).dropNull();
+        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(dailyMultiplier).gte(this.minValueDaily)).dropNull();
+      }
+
+      if (!Double.isNaN(this.maxValueDaily)) {
+        aggregates = aggregates.filter(aggregates.getDoubles(COL_VALUE).multiply(dailyMultiplier).lte(this.maxValueDaily)).dropNull();
       }
 
       aggregates = aggregates.sortedBy(COL_VALUE).reverse();
@@ -225,6 +250,7 @@ public class DimensionWrapper extends DetectionPipeline {
 
       for (String nestedMetricUrn : this.nestedMetricUrns) {
         nestedMetrics.add(MetricEntity.fromURN(nestedMetricUrn));
+        evaluationMetricUrns.add(nestedMetricUrn);
       }
     }
 
@@ -281,6 +307,8 @@ public class DimensionWrapper extends DetectionPipeline {
     Map<String, Object> diagnostics = new HashMap<>();
     Set<Long> lastTimeStamps = new HashSet<>();
 
+    warmUpAnomaliesCache(nestedMetrics);
+
     long totalNestedMetrics = nestedMetrics.size();
     long successNestedMetrics = 0; // record the number of successfully explored dimensions
     List<Exception> exceptions = new ArrayList<>();
@@ -325,6 +353,31 @@ public class DimensionWrapper extends DetectionPipeline {
     checkNestedMetricsStatus(totalNestedMetrics, successNestedMetrics, exceptions, predictionResults);
     return new DetectionPipelineResult(anomalies, DetectionUtils.consolidateNestedLastTimeStamps(lastTimeStamps),
         predictionResults, calculateEvaluationMetrics(predictionResults)).setDiagnostics(diagnostics);
+  }
+
+  private DatasetConfigDTO retrieveDatasetConfig(List<MetricEntity> nestedMetrics) {
+    // All nested metrics after dimension explore belong to the same dataset
+    long metricId = nestedMetrics.get(0).getId();
+    MetricConfigDTO metricConfigDTO = this.provider.fetchMetrics(Collections.singletonList(metricId)).get(metricId);
+
+    return this.provider.fetchDatasets(Collections.singletonList(metricConfigDTO.getDataset()))
+        .get(metricConfigDTO.getDataset());
+  }
+
+  private void warmUpAnomaliesCache(List<MetricEntity> nestedMetrics) {
+    DatasetConfigDTO dataset = retrieveDatasetConfig(nestedMetrics);
+    long cachingPeriodLookback = config.getProperties().containsKey(PROP_CACHE_PERIOD_LOOKBACK) ?
+        MapUtils.getLong(config.getProperties(), PROP_CACHE_PERIOD_LOOKBACK) : ThirdEyeUtils
+        .getCachingPeriodLookback(dataset.bucketTimeGranularity());
+
+    long paddingBuffer = TimeUnit.DAYS.toMillis(1);
+    AnomalySlice anomalySlice = new AnomalySlice()
+        .withDetectionId(this.config.getId())
+        .withStart(startTime - cachingPeriodLookback - paddingBuffer)
+        .withEnd(endTime + paddingBuffer);
+    Multimap<AnomalySlice, MergedAnomalyResultDTO> warmUpResults = this.provider.fetchAnomalies(Collections.singleton(anomalySlice));
+    LOG.info("Warmed up anomalies cache for detection {} with {} anomalies - start: {} end: {}", config.getId(),
+        warmUpResults.values().size(), (startTime - cachingPeriodLookback), endTime);
   }
 
   private List<EvaluationDTO> calculateEvaluationMetrics(List<PredictionResult> predictionResults) {

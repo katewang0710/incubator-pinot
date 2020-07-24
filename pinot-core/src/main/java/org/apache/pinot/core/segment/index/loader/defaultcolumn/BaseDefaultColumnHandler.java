@@ -20,6 +20,7 @@ package org.apache.pinot.core.segment.index.loader.defaultcolumn;
 
 import com.google.common.base.Preconditions;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.HashMap;
@@ -28,22 +29,24 @@ import java.util.Map;
 import java.util.Set;
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.common.utils.StringUtil;
-import org.apache.pinot.spi.utils.ByteArray;
 import org.apache.pinot.core.segment.creator.ColumnIndexCreationInfo;
-import org.apache.pinot.core.segment.creator.ForwardIndexType;
-import org.apache.pinot.core.segment.creator.InvertedIndexType;
+import org.apache.pinot.core.segment.creator.TextIndexType;
 import org.apache.pinot.core.segment.creator.impl.SegmentColumnarIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.SegmentDictionaryCreator;
 import org.apache.pinot.core.segment.creator.impl.V1Constants;
 import org.apache.pinot.core.segment.creator.impl.fwd.MultiValueUnsortedForwardIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.fwd.SingleValueSortedForwardIndexCreator;
-import org.apache.pinot.core.segment.index.ColumnMetadata;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
+import org.apache.pinot.core.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.core.segment.index.loader.LoaderUtils;
+import org.apache.pinot.core.segment.index.metadata.ColumnMetadata;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.core.segment.store.SegmentDirectory;
+import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.utils.ByteArray;
+import org.apache.pinot.spi.utils.BytesUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,19 +58,23 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     // Present in schema but not in segment.
     ADD_DIMENSION,
     ADD_METRIC,
+    ADD_DATE_TIME,
     // Present in segment but not in schema
     REMOVE_DIMENSION,
     REMOVE_METRIC,
+    REMOVE_DATE_TIME,
     // Present in both segment and schema but one of the following updates is needed
     UPDATE_DIMENSION_DATA_TYPE,
     UPDATE_DIMENSION_DEFAULT_VALUE,
     UPDATE_DIMENSION_NUMBER_OF_VALUES,
     UPDATE_METRIC_DATA_TYPE,
     UPDATE_METRIC_DEFAULT_VALUE,
-    UPDATE_METRIC_NUMBER_OF_VALUES;
+    UPDATE_METRIC_NUMBER_OF_VALUES,
+    UPDATE_DATE_TIME_DATA_TYPE,
+    UPDATE_DATE_TIME_DEFAULT_VALUE;
 
     boolean isAddAction() {
-      return this == ADD_DIMENSION || this == ADD_METRIC;
+      return this == ADD_DIMENSION || this == ADD_METRIC || this == ADD_DATE_TIME;
     }
 
     boolean isUpdateAction() {
@@ -75,20 +82,23 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     }
 
     boolean isRemoveAction() {
-      return this == REMOVE_DIMENSION || this == REMOVE_METRIC;
+      return this == REMOVE_DIMENSION || this == REMOVE_METRIC || this == REMOVE_DATE_TIME;
     }
   }
 
   protected final File _indexDir;
   protected final Schema _schema;
   protected final SegmentMetadataImpl _segmentMetadata;
+  protected final SegmentDirectory.Writer _segmentWriter;
 
   private final PropertiesConfiguration _segmentProperties;
 
-  protected BaseDefaultColumnHandler(File indexDir, Schema schema, SegmentMetadataImpl segmentMetadata) {
+  protected BaseDefaultColumnHandler(File indexDir, Schema schema, SegmentMetadataImpl segmentMetadata,
+      SegmentDirectory.Writer segmentWriter) {
     _indexDir = indexDir;
     _schema = schema;
     _segmentMetadata = segmentMetadata;
+    _segmentWriter = segmentWriter;
     _segmentProperties = SegmentMetadataImpl.getPropertiesConfiguration(indexDir);
   }
 
@@ -96,7 +106,7 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
    * {@inheritDoc}
    */
   @Override
-  public void updateDefaultColumns()
+  public void updateDefaultColumns(IndexLoadingConfig indexLoadingConfig)
       throws Exception {
     // Compute the action needed for each column.
     Map<String, DefaultColumnAction> defaultColumnActionMap = computeDefaultColumnActionMap();
@@ -107,7 +117,7 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     // Update each default column based on the default column action.
     for (Map.Entry<String, DefaultColumnAction> entry : defaultColumnActionMap.entrySet()) {
       // This method updates the metadata properties, need to save it later.
-      updateDefaultColumn(entry.getKey(), entry.getValue());
+      updateDefaultColumn(entry.getKey(), entry.getValue(), indexLoadingConfig);
     }
 
     // Update the segment metadata.
@@ -115,6 +125,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         LoaderUtils.getStringListFromSegmentProperties(V1Constants.MetadataKeys.Segment.DIMENSIONS, _segmentProperties);
     List<String> metricColumns =
         LoaderUtils.getStringListFromSegmentProperties(V1Constants.MetadataKeys.Segment.METRICS, _segmentProperties);
+    List<String> dateTimeColumns = LoaderUtils
+        .getStringListFromSegmentProperties(V1Constants.MetadataKeys.Segment.DATETIME_COLUMNS, _segmentProperties);
     for (Map.Entry<String, DefaultColumnAction> entry : defaultColumnActionMap.entrySet()) {
       String column = entry.getKey();
       DefaultColumnAction action = entry.getValue();
@@ -125,18 +137,24 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         case ADD_METRIC:
           metricColumns.add(column);
           break;
+        case ADD_DATE_TIME:
+          dateTimeColumns.add(column);
+          break;
         case REMOVE_DIMENSION:
           dimensionColumns.remove(column);
           break;
         case REMOVE_METRIC:
           metricColumns.remove(column);
           break;
+        case REMOVE_DATE_TIME:
+          dateTimeColumns.remove(column);
         default:
           break;
       }
     }
     _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.DIMENSIONS, dimensionColumns);
     _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.METRICS, metricColumns);
+    _segmentProperties.setProperty(V1Constants.MetadataKeys.Segment.DATETIME_COLUMNS, dateTimeColumns);
 
     // Create a back up for origin metadata.
     File metadataFile = _segmentProperties.getFile();
@@ -146,7 +164,12 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     }
 
     // Save the new metadata.
-    _segmentProperties.save();
+    //
+    // Commons Configuration 1.10 does not support file path containing '%'.
+    // Explicitly providing the output stream for save bypasses the problem. */
+    try (FileOutputStream fileOutputStream = new FileOutputStream(_segmentProperties.getFile())) {
+      _segmentProperties.save(fileOutputStream);
+    }
   }
 
   /**
@@ -155,7 +178,7 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
    *
    * @return Action Map for each column.
    */
-  private Map<String, DefaultColumnAction> computeDefaultColumnActionMap() {
+  Map<String, DefaultColumnAction> computeDefaultColumnActionMap() {
     Map<String, DefaultColumnAction> defaultColumnActionMap = new HashMap<>();
 
     // Compute ADD and UPDATE actions.
@@ -184,14 +207,14 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
         }
 
         // Check the data type and default value matches.
-        FieldSpec.DataType dataTypeInMetadata = columnMetadata.getDataType();
-        FieldSpec.DataType dataTypeInSchema = fieldSpecInSchema.getDataType();
+        DataType dataTypeInMetadata = columnMetadata.getDataType();
+        DataType dataTypeInSchema = fieldSpecInSchema.getDataType();
         boolean isSingleValueInMetadata = columnMetadata.isSingleValue();
         boolean isSingleValueInSchema = fieldSpecInSchema.isSingleValueField();
         String defaultValueInMetadata = columnMetadata.getDefaultNullValueString();
 
         String defaultValueInSchema;
-        if (dataTypeInSchema == FieldSpec.DataType.BYTES) {
+        if (dataTypeInSchema == DataType.BYTES) {
           defaultValueInSchema = BytesUtils.toHexString((byte[]) fieldSpecInSchema.getDefaultNullValue());
         } else {
           defaultValueInSchema = fieldSpecInSchema.getDefaultNullValue().toString();
@@ -205,14 +228,19 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           } else if (isSingleValueInMetadata != isSingleValueInSchema) {
             defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_DIMENSION_NUMBER_OF_VALUES);
           }
-        } else {
-          Preconditions.checkState(fieldTypeInMetadata == FieldSpec.FieldType.METRIC);
+        } else if (fieldTypeInMetadata == FieldSpec.FieldType.METRIC) {
           if (dataTypeInMetadata != dataTypeInSchema) {
             defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_METRIC_DATA_TYPE);
           } else if (!defaultValueInSchema.equals(defaultValueInMetadata)) {
             defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_METRIC_DEFAULT_VALUE);
           } else if (isSingleValueInMetadata != isSingleValueInSchema) {
             defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_METRIC_NUMBER_OF_VALUES);
+          }
+        } else if (fieldTypeInMetadata == FieldSpec.FieldType.DATE_TIME) {
+          if (dataTypeInMetadata != dataTypeInSchema) {
+            defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_DATE_TIME_DATA_TYPE);
+          } else if (!defaultValueInSchema.equals(defaultValueInMetadata)) {
+            defaultColumnActionMap.put(column, DefaultColumnAction.UPDATE_DATE_TIME_DEFAULT_VALUE);
           }
         }
       } else {
@@ -225,6 +253,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           case METRIC:
             defaultColumnActionMap.put(column, DefaultColumnAction.ADD_METRIC);
             break;
+          case DATE_TIME:
+            defaultColumnActionMap.put(column, DefaultColumnAction.ADD_DATE_TIME);
           default:
             LOGGER.warn("Skip adding default column for column: {} with field type: {}", column, fieldTypeInSchema);
             break;
@@ -243,9 +273,10 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
           FieldSpec.FieldType fieldTypeInMetadata = columnMetadata.getFieldType();
           if (fieldTypeInMetadata == FieldSpec.FieldType.DIMENSION) {
             defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DIMENSION);
-          } else {
-            Preconditions.checkState(fieldTypeInMetadata == FieldSpec.FieldType.METRIC);
+          } else if (fieldTypeInMetadata == FieldSpec.FieldType.METRIC) {
             defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_METRIC);
+          } else if (fieldTypeInMetadata == FieldSpec.FieldType.DATE_TIME) {
+            defaultColumnActionMap.put(column, DefaultColumnAction.REMOVE_DATE_TIME);
           }
         }
       }
@@ -262,7 +293,8 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
    * @param action default column action.
    * @throws Exception
    */
-  protected abstract void updateDefaultColumn(String column, DefaultColumnAction action)
+  protected abstract void updateDefaultColumn(String column, DefaultColumnAction action,
+      IndexLoadingConfig indexLoadingConfig)
       throws Exception;
 
   /**
@@ -292,17 +324,15 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
    */
   protected void createColumnV1Indices(String column)
       throws Exception {
-    final FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
+    FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
     Preconditions.checkNotNull(fieldSpec);
 
     // Generate column index creation information.
-    final int totalDocs = _segmentMetadata.getTotalDocs();
-    final int totalRawDocs = _segmentMetadata.getTotalRawDocs();
-    final int totalAggDocs = totalDocs - totalRawDocs;
-    final FieldSpec.DataType dataType = fieldSpec.getDataType();
-    final Object defaultValue = fieldSpec.getDefaultNullValue();
-    final boolean isSingleValue = fieldSpec.isSingleValueField();
-    final int maxNumberOfMultiValueElements = isSingleValue ? 0 : 1;
+    int totalDocs = _segmentMetadata.getTotalDocs();
+    DataType dataType = fieldSpec.getDataType();
+    Object defaultValue = fieldSpec.getDefaultNullValue();
+    boolean isSingleValue = fieldSpec.isSingleValueField();
+    int maxNumberOfMultiValueElements = isSingleValue ? 0 : 1;
     int dictionaryElementSize = 0;
 
     Object sortedArray;
@@ -333,7 +363,10 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
       case BYTES:
         Preconditions.checkState(defaultValue instanceof byte[]);
         dictionaryElementSize = ((byte[]) defaultValue).length;
-        sortedArray = new ByteArray[] {new ByteArray((byte[]) defaultValue)};
+        // Convert byte[] to ByteArray for internal usage
+        ByteArray bytesDefaultValue = new ByteArray((byte[]) defaultValue);
+        defaultValue = bytesDefaultValue;
+        sortedArray = new ByteArray[]{bytesDefaultValue};
         break;
       default:
         throw new UnsupportedOperationException("Unsupported data type: " + dataType + " for column: " + column);
@@ -343,14 +376,12 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
             totalDocs, maxNumberOfMultiValueElements);
 
     ColumnIndexCreationInfo columnIndexCreationInfo =
-        new ColumnIndexCreationInfo(columnStatistics, true/*createDictionary*/, false,
-            ForwardIndexType.FIXED_BIT_COMPRESSED, InvertedIndexType.SORTED_INDEX, true/*isAutoGenerated*/,
+        new ColumnIndexCreationInfo(columnStatistics, true/*createDictionary*/, false, true/*isAutoGenerated*/,
             defaultValue/*defaultNullValue*/);
 
     // Create dictionary.
     // We will have only one value in the dictionary.
-    try (SegmentDictionaryCreator creator =
-        new SegmentDictionaryCreator(sortedArray, fieldSpec, _indexDir, false)) {
+    try (SegmentDictionaryCreator creator = new SegmentDictionaryCreator(sortedArray, fieldSpec, _indexDir, false)) {
       creator.build();
     }
 
@@ -358,29 +389,28 @@ public abstract class BaseDefaultColumnHandler implements DefaultColumnHandler {
     if (isSingleValue) {
       // Single-value column.
 
-      SingleValueSortedForwardIndexCreator svFwdIndexCreator =
-          new SingleValueSortedForwardIndexCreator(_indexDir, fieldSpec.getName(), 1/*cardinality*/);
-      for (int docId = 0; docId < totalDocs; docId++) {
-        svFwdIndexCreator.index(docId, 0/*dictionaryId*/);
+      try (SingleValueSortedForwardIndexCreator svFwdIndexCreator = new SingleValueSortedForwardIndexCreator(_indexDir,
+          fieldSpec.getName(), 1/*cardinality*/)) {
+        for (int docId = 0; docId < totalDocs; docId++) {
+          svFwdIndexCreator.putDictId(0);
+        }
       }
-      svFwdIndexCreator.close();
     } else {
       // Multi-value column.
 
-      MultiValueUnsortedForwardIndexCreator mvFwdIndexCreator =
-          new MultiValueUnsortedForwardIndexCreator(_indexDir, fieldSpec.getName(), 1/*cardinality*/,
-              totalDocs/*numDocs*/, totalDocs/*totalNumberOfValues*/);
-      int[] dictIds = {0};
-      for (int docId = 0; docId < totalDocs; docId++) {
-        mvFwdIndexCreator.index(docId, dictIds);
+      try (
+          MultiValueUnsortedForwardIndexCreator mvFwdIndexCreator = new MultiValueUnsortedForwardIndexCreator(_indexDir,
+              fieldSpec.getName(), 1/*cardinality*/, totalDocs/*numDocs*/, totalDocs/*totalNumberOfValues*/)) {
+        int[] dictIds = {0};
+        for (int docId = 0; docId < totalDocs; docId++) {
+          mvFwdIndexCreator.putDictIdMV(dictIds);
+        }
       }
-      mvFwdIndexCreator.close();
     }
 
     // Add the column metadata information to the metadata properties.
     SegmentColumnarIndexCreator
-        .addColumnMetadataInfo(_segmentProperties, column, columnIndexCreationInfo, totalDocs, totalRawDocs,
-            totalAggDocs, fieldSpec, true/*hasDictionary*/, dictionaryElementSize, true/*hasInvertedIndex*/,
-            null/*hllOriginColumn*/);
+        .addColumnMetadataInfo(_segmentProperties, column, columnIndexCreationInfo, totalDocs, fieldSpec,
+            true/*hasDictionary*/, dictionaryElementSize, true/*hasInvertedIndex*/, TextIndexType.NONE);
   }
 }

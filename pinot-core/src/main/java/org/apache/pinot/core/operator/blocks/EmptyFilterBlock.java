@@ -18,7 +18,7 @@
  */
 package org.apache.pinot.core.operator.blocks;
 
-import org.apache.pinot.core.operator.docidsets.EmptyFilterBlockDocIdSet;
+import org.apache.pinot.core.operator.docidsets.EmptyDocIdSet;
 
 
 /**
@@ -26,7 +26,7 @@ import org.apache.pinot.core.operator.docidsets.EmptyFilterBlockDocIdSet;
  */
 public final class EmptyFilterBlock extends FilterBlock {
   private EmptyFilterBlock() {
-    super(EmptyFilterBlockDocIdSet.getInstance());
+    super(EmptyDocIdSet.getInstance());
   }
 
   private static final EmptyFilterBlock INSTANCE = new EmptyFilterBlock();

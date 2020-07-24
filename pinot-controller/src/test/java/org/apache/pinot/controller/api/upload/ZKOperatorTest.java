@@ -19,14 +19,15 @@
 package org.apache.pinot.controller.api.upload;
 
 import javax.ws.rs.core.HttpHeaders;
-import org.apache.pinot.common.config.TableConfig;
 import org.apache.pinot.common.metadata.segment.OfflineSegmentZKMetadata;
 import org.apache.pinot.common.metrics.ControllerMetrics;
-import org.apache.pinot.common.segment.SegmentMetadata;
-import org.apache.pinot.common.utils.CommonConstants;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.helix.ControllerTest;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadata;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -51,8 +52,7 @@ public class ZKOperatorTest extends ControllerTest {
     addFakeBrokerInstancesToAutoJoinHelixCluster(1, true);
     addFakeServerInstancesToAutoJoinHelixCluster(1, true);
 
-    TableConfig tableConfig =
-        new TableConfig.Builder(CommonConstants.Helix.TableType.OFFLINE).setTableName(RAW_TABLE_NAME).build();
+    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(RAW_TABLE_NAME).build();
     _helixResourceManager.addTable(tableConfig);
   }
 
@@ -66,9 +66,8 @@ public class ZKOperatorTest extends ControllerTest {
     when(segmentMetadata.getCrc()).thenReturn("12345");
     when(segmentMetadata.getIndexCreationTime()).thenReturn(123L);
     HttpHeaders httpHeaders = mock(HttpHeaders.class);
-    when(httpHeaders.getHeaderString(FileUploadDownloadClient.CustomHeaders.CRYPTER)).thenReturn("crypter");
     zkOperator.completeSegmentOperations(RAW_TABLE_NAME, segmentMetadata, null, null, false, httpHeaders, "downloadUrl",
-        false);
+        false, "crypter");
 
     OfflineSegmentZKMetadata segmentZKMetadata =
         _helixResourceManager.getOfflineSegmentZKMetadata(RAW_TABLE_NAME, SEGMENT_NAME);
@@ -84,7 +83,7 @@ public class ZKOperatorTest extends ControllerTest {
     when(httpHeaders.getHeaderString(HttpHeaders.IF_MATCH)).thenReturn("123");
     try {
       zkOperator.completeSegmentOperations(RAW_TABLE_NAME, segmentMetadata, null, null, false, httpHeaders,
-          "otherDownloadUrl", false);
+          "otherDownloadUrl", false, null);
       fail();
     } catch (Exception e) {
       // Expected
@@ -94,10 +93,9 @@ public class ZKOperatorTest extends ControllerTest {
     // downloadURL and crypter
     when(httpHeaders.getHeaderString(HttpHeaders.IF_MATCH)).thenReturn("12345");
     when(segmentMetadata.getIndexCreationTime()).thenReturn(456L);
-    when(httpHeaders.getHeaderString(FileUploadDownloadClient.CustomHeaders.CRYPTER)).thenReturn("otherCrypter");
     zkOperator
         .completeSegmentOperations(RAW_TABLE_NAME, segmentMetadata, null, null, false, httpHeaders, "otherDownloadUrl",
-            false);
+            false, "otherCrypter");
     segmentZKMetadata = _helixResourceManager.getOfflineSegmentZKMetadata(RAW_TABLE_NAME, SEGMENT_NAME);
     assertEquals(segmentZKMetadata.getCrc(), 12345L);
     // Push time should not change
@@ -113,12 +111,11 @@ public class ZKOperatorTest extends ControllerTest {
     // Refresh the segment with a different segment (different CRC)
     when(segmentMetadata.getCrc()).thenReturn("23456");
     when(segmentMetadata.getIndexCreationTime()).thenReturn(789L);
-    when(httpHeaders.getHeaderString(FileUploadDownloadClient.CustomHeaders.CRYPTER)).thenReturn("otherCrypter");
     // Add a tiny sleep to guarantee that refresh time is different from the previous round
     Thread.sleep(10L);
     zkOperator
         .completeSegmentOperations(RAW_TABLE_NAME, segmentMetadata, null, null, false, httpHeaders, "otherDownloadUrl",
-            false);
+            false, "otherCrypter");
     segmentZKMetadata = _helixResourceManager.getOfflineSegmentZKMetadata(RAW_TABLE_NAME, SEGMENT_NAME);
     assertEquals(segmentZKMetadata.getCrc(), 23456L);
     // Push time should not change

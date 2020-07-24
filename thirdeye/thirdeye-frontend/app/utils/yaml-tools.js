@@ -1,57 +1,59 @@
 import yamljs from 'yamljs';
 import jsyaml from 'js-yaml';
 
-export const defaultDetectionYaml = `# Below is a sample template. You may refer the documentation for more examples and update the fields accordingly.
-# Give a name for this anomaly detection pipeline (should be unique).
-detectionName: name_of_the_detection
-# Tell the alert recipients what it means if this alert is fired.
-description: If this alert fires then it means so-and-so and check so-and-so for irregularities
-# The metric you want to do anomaly detection on. You may type a few characters and look ahead (ctrl + space) to auto-fill.
-metric: metric_name
-# The dataset or UMP table name to which the metric belongs. Look ahead should auto populate this field.
-dataset: dataset_name
-rules:                            # Can configure multiple rules with "OR" relationship.
+export const defaultDetectionYaml = `detectionName: 'give_a_unique_name_to_this_alert'
+description: 'If this alert fires then it means ...'
+
+# Tip: Type a few characters and look ahead (ctrl + space) to auto-fill.
+metric: metric_to_monitor
+dataset: dataset_to_which_this_metric_belongs
+
+# Configure multiple rules with "OR" relationship.
+rules:
 - detection:
-    - name: detection_rule_1
-      type: ALGORITHM             # Configure the detection type here. See doc for more details.
-      params:                     # The parameters for this rule. Different rules have different params.
-        configuration:
-          bucketPeriod: P1D       # Use PT1H for hourly and PT5M for minute level (ingraph metrics) data.
-          pValueThreshold: 0.05   # Higher value means more sensitive to small changes.
-          mlConfig: true          # The machine learning auto config to select and maintain the configuration with the best performance.
-  filter:                         # Filter out anomalies detected by rules to reduce noise.
-    - name: filter_rule_1
-      type: PERCENTAGE_CHANGE_FILTER
-      params:
-        pattern: UP_OR_DOWN       # Other patterns: "UP","DOWN".
-        threshold: 0.05           # Filter out all changes less than 5% compared to baseline.
+  - name: detection_rule_1
+    type: ALGORITHM             # Configure the detection type here. See doc for more details.
+    params:                     # The parameters for this rule. Different rules have different params.
+      configuration:
+        bucketPeriod: P1D       # Use P1D for daily; PT1H for hourly; PT5M for minutely data.
+        pValueThreshold: 0.05   # Higher value means more sensitive to small changes.
+        mlConfig: true          # Automatically maintain configuration with the best performance.
+  filter:                       # Filter out anomalies detected by rules to reduce noise.
+  - name: filter_rule_1
+    type: PERCENTAGE_CHANGE_FILTER
+    params:
+      pattern: UP_OR_DOWN       # Other patterns: "UP","DOWN".
+      threshold: 0.05           # Filter out all changes less than 5% compared to baseline.
+  quality:                      # Configure the data quality rules
+  - name: data_sla_rule_1
+    type: DATA_SLA              # Alert if data is missing.
+    params:
+      sla: 3_DAYS               # Data is missing for 3 days since last availability
 `;
 
-export const defaultSubscriptionYaml = `# Below is a sample subscription group template. You may refer the documentation and update accordingly.
-# The name of the subscription group. You may choose an existing or a provide a new subscription group name
-subscriptionGroupName: test_subscription_group
-# Every alert in ThirdEye is attached to an application. Please specify the registered application name here. You may request for a new application by dropping an email to ask_thirdeye
+export const defaultSubscriptionYaml = `subscriptionGroupName: 'give_a_unique_name_to_this_group'
+
+# Specify your registered application name here. Contact admin/team to register a new one.
 application: thirdeye-internal
-# List of detection names that you want to subscribe. Copy-paste the detection name from the above anomaly detection config here.
+
+# List all alerts (detectionName) you want to subscribe to.
 subscribedDetections:
-  - name_of_the_detection_above
-# Configure how you want to be alerted. You can receive the standard ThirdEye email alert (recommended)
-# or for advanced critical use-cases setup Iris alert by referring to the documentation
+- 'list_the_detection_you_want_to_subscribe'
+
+# Setup Email, Jira or other notification channels
 alertSchemes:
 - type: EMAIL
-recipients:
- to:
-  - "me@company.com"          # Specify alert recipient email address here
-  - "me@company.com"
- cc:
-  - "cc_email@company.com"
-fromAddress: thirdeye-dev@linkedin.com
-# Enable or disable notification of alert
-active: true
-# The below links will appear in the email alerts. This will help alert recipients to quickly refer and act on.
-referenceLinks:
-  "Oncall Runbook": "http://go/oncall"
-  "Thirdeye FAQs": "http://go/thirdeyefaqs"
+  params:
+    recipients:
+      to:
+      - me@company.com
+      - you@company.com
+      cc:
+      - manager@company.com
+
+# Make these links appear in the alert notifications
+# referenceLinks:
+#   "Alert Runbook": "link_to_your_product_runbook"
 `;
 
 /**
@@ -336,12 +338,131 @@ export function postYamlProps(postData) {
   };
 }
 
+export function enrichAlertResponseObject(alerts) {
+  for (let yamlAlert of alerts) {
+    let dimensions = '';
+    let dimensionsArray = yamlAlert.dimensionExploration ? yamlAlert.dimensionExploration.dimensions : null;
+    if (Array.isArray(dimensionsArray)) {
+      dimensionsArray.forEach(dim => {
+        dimensions = dimensions + `${dim}, `;
+      });
+      dimensions = dimensions.substring(0, dimensions.length-2);
+    }
+    Object.assign(yamlAlert, {
+      functionName: yamlAlert.name,
+      collection: yamlAlert.datasetNames.toString(),
+      granularity: yamlAlert.monitoringGranularity.toString(),
+      type: _detectionType(yamlAlert),
+      exploreDimensions: dimensions,
+      filters: formatYamlFilter(yamlAlert.filters),
+      isNewPipeline: true,
+      group: Array.isArray(yamlAlert.subscriptionGroup) ? yamlAlert.subscriptionGroup.join(", ") : null
+    });
+  }
+
+  return alerts;
+}
+
+/**
+ * Grab detection type if available, else return yamlAlert.pipelineType
+ */
+function _detectionType(yamlAlert) {
+  if (yamlAlert.rules && Array.isArray(yamlAlert.rules) && yamlAlert.rules.length > 0) {
+    if (yamlAlert.rules[0].detection && Array.isArray(yamlAlert.rules[0].detection) && yamlAlert.rules[0].detection.length > 0) {
+      return yamlAlert.rules[0].detection[0].type;
+    }
+  }
+  return yamlAlert.pipelineType;
+}
+
+// Maps filter name to alert property for filtering
+export const filterToPropertyMap = {
+  application: 'application',
+  subscription: 'group',
+  owner: 'createdBy',
+  type: 'type',
+  metric: 'metric',
+  dataset: 'collection',
+  granularity: 'granularity'
+};
+
+// Maps filter name to alerts API params for filtering
+export const filterToParamsMap = {
+  application: 'application',
+  subscription: 'subscriptionGroup',
+  owner: 'createdBy',
+  type: 'ruleType',
+  metric: 'metric',
+  dataset: 'dataset',
+  granularity: 'granularity',
+  status: 'active',
+  names: 'names'
+};
+
+export function populateFiltersLocal(originalAlerts, rules) {
+  // This filter category is "secondary". To add more, add an entry here and edit the controller's "filterToPropertyMap"
+  const filterBlocksLocal = [
+    {
+      name: 'status',
+      title: 'Status',
+      type: 'checkbox',
+      selected: ['Active', 'Inactive'],
+      filterKeys: ['Active', 'Inactive']
+    },
+    {
+      name: 'application',
+      title: 'Applications',
+      type: 'search',
+      matchWidth: true,
+      hasNullOption: true, // allow searches for 'none'
+      filterKeys: []
+    },
+    {
+      name: 'subscription',
+      title: 'Subscription Groups',
+      hasNullOption: true, // allow searches for 'none'
+      type: 'search',
+      filterKeys: []
+    },
+    {
+      name: 'owner',
+      title: 'Owners',
+      type: 'search',
+      matchWidth: true,
+      filterKeys: []
+    },
+    {
+      name: 'type',
+      title: 'Detection Type',
+      type: 'select',
+      filterKeys: rules
+    },
+    {
+      name: 'metric',
+      title: 'Metrics',
+      type: 'search',
+      filterKeys: []
+    },
+    {
+      name: 'dataset',
+      title: 'Datasets',
+      type: 'search',
+      filterKeys: []
+    }
+  ];
+  return filterBlocksLocal;
+}
+
 export default {
   defaultDetectionYaml,
   defaultSubscriptionYaml,
+  enrichAlertResponseObject,
+  filterToParamsMap,
+  filterToPropertyMap,
   formatYamlFilter,
   getValueFromYaml,
   fieldsToYaml,
+  populateFiltersLocal,
   postYamlProps,
   redundantParse
 };

@@ -36,15 +36,14 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
-import org.apache.pinot.common.config.SegmentsValidationAndRetentionConfig;
-import org.apache.pinot.common.config.TableConfig;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.utils.StringUtil;
 import org.apache.pinot.hadoop.job.mappers.SegmentCreationMapper;
 import org.apache.pinot.hadoop.utils.PinotHadoopJobPreparationHelper;
 import org.apache.pinot.ingestion.common.JobConfigConstants;
 import org.apache.pinot.ingestion.jobs.SegmentCreationJob;
 import org.apache.pinot.ingestion.utils.JobPreparationHelper;
+import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
 
 
 public class HadoopSegmentCreationJob extends SegmentCreationJob {
@@ -102,7 +101,7 @@ public class HadoopSegmentCreationJob extends SegmentCreationJob {
     TableConfig tableConfig = getTableConfig();
     if (tableConfig != null) {
       validateTableConfig(tableConfig);
-      jobConf.set(JobConfigConstants.TABLE_CONFIG, tableConfig.toJsonConfigString());
+      jobConf.set(JobConfigConstants.TABLE_CONFIG, tableConfig.toJsonString());
     }
     jobConf.set(JobConfigConstants.SCHEMA, getSchema().toSingleLineJsonString());
 
@@ -160,7 +159,8 @@ public class HadoopSegmentCreationJob extends SegmentCreationJob {
       throws IOException {
     if (_depsJarDir != null) {
       PinotHadoopJobPreparationHelper
-          .addDepsJarToDistributedCacheHelper(FileSystem.get(new Path(_depsJarDir).toUri(), getConf()), job, new Path(_depsJarDir));
+          .addDepsJarToDistributedCacheHelper(FileSystem.get(new Path(_depsJarDir).toUri(), getConf()), job,
+              new Path(_depsJarDir));
     }
   }
 

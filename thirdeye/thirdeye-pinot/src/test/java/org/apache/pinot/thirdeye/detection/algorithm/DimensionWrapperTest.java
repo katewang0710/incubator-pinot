@@ -16,12 +16,16 @@
 
 package org.apache.pinot.thirdeye.detection.algorithm;
 
+import java.util.concurrent.TimeUnit;
+import org.apache.pinot.thirdeye.constant.MetricAggFunction;
 import org.apache.pinot.thirdeye.dataframe.DataFrame;
 import org.apache.pinot.thirdeye.dataframe.DoubleSeries;
 import org.apache.pinot.thirdeye.dataframe.StringSeries;
 import org.apache.pinot.thirdeye.dataframe.util.MetricSlice;
+import org.apache.pinot.thirdeye.datalayer.dto.DatasetConfigDTO;
 import org.apache.pinot.thirdeye.datalayer.dto.DetectionConfigDTO;
 import org.apache.pinot.thirdeye.datalayer.dto.MergedAnomalyResultDTO;
+import org.apache.pinot.thirdeye.datalayer.dto.MetricConfigDTO;
 import org.apache.pinot.thirdeye.detection.DataProvider;
 import org.apache.pinot.thirdeye.detection.MockDataProvider;
 import org.apache.pinot.thirdeye.detection.MockPipeline;
@@ -73,10 +77,18 @@ public class DimensionWrapperTest {
   private Map<String, Object> nestedProperties;
   private Map<MetricSlice, DataFrame> aggregates;
 
+  private MetricConfigDTO createTestMetricConfig(long id) {
+    MetricConfigDTO metric = new MetricConfigDTO();
+    metric.setDataset("TEST");
+    metric.setId(id);
+    metric.setDefaultAggFunction(MetricAggFunction.SUM);
+    return metric;
+  }
+
   @BeforeMethod
   public void beforeMethod() {
     this.aggregates = new HashMap<>();
-    this.aggregates.put(MetricSlice.from(1, 10, 15),
+    this.aggregates.put(MetricSlice.from(2, 10, 15),
         new DataFrame()
             .addSeries("a", StringSeries.buildFrom("1", "1", "1", "1", "1", "2", "2", "2", "2", "2"))
             .addSeries("b", StringSeries.buildFrom("1", "2", "1", "2", "3", "1", "2", "1", "2", "3"))
@@ -86,8 +98,19 @@ public class DimensionWrapperTest {
 
     this.outputs = new ArrayList<>();
 
+    DatasetConfigDTO dataset = new DatasetConfigDTO();
+    dataset.setDataset("TEST");
+    dataset.setNonAdditiveBucketSize(5);
+    dataset.setNonAdditiveBucketUnit(TimeUnit.MILLISECONDS);
+    MetricConfigDTO metric1 = createTestMetricConfig(2L);
+    MetricConfigDTO metric2 = createTestMetricConfig(10L);
+    MetricConfigDTO metric3 = createTestMetricConfig(11L);
+    MetricConfigDTO metric4 = createTestMetricConfig(12L);
     this.provider = new MockDataProvider()
         .setAggregates(this.aggregates)
+        .setMetrics(Arrays.asList(metric1, metric2, metric3, metric4))
+        .setDatasets(Collections.singletonList(dataset))
+        .setAnomalies(Collections.emptyList())
         .setLoader(new MockPipelineLoader(this.runs, this.outputs));
 
     this.nestedProperties = new HashMap<>();
@@ -95,7 +118,7 @@ public class DimensionWrapperTest {
     this.nestedProperties.put("key", "value");
 
     this.properties = new HashMap<>();
-    this.properties.put(PROP_METRIC_URN, "thirdeye:metric:1");
+    this.properties.put(PROP_METRIC_URN, "thirdeye:metric:2");
     this.properties.put(PROP_DIMENSIONS, Arrays.asList("a", "b"));
     this.properties.put(PROP_NESTED_METRIC_URN_KEY, PROP_NESTED_METRIC_URN_KEY_VALUE);
     this.properties.put(PROP_NESTED_METRIC_URNS, PROP_NESTED_METRIC_URN_VALUES);
@@ -211,6 +234,21 @@ public class DimensionWrapperTest {
     this.properties.put(PROP_DIMENSIONS, Collections.singleton("b"));
     this.properties.put(PROP_MIN_VALUE, 16.0d);
     this.properties.put(PROP_NESTED_METRIC_URNS, Arrays.asList("thirdeye:metric:10", "thirdeye:metric:11"));
+
+    DatasetConfigDTO dataset = new DatasetConfigDTO();
+    dataset.setDataset("TEST");
+    dataset.setNonAdditiveBucketSize(5);
+    dataset.setNonAdditiveBucketUnit(TimeUnit.MILLISECONDS);
+    MetricConfigDTO metric0 = createTestMetricConfig(2L);
+    MetricConfigDTO metric1 = createTestMetricConfig(10L);
+    MetricConfigDTO metric2 = createTestMetricConfig(11L);
+
+    this.provider = new MockDataProvider()
+        .setAggregates(this.aggregates)
+        .setMetrics(Arrays.asList(metric0, metric1, metric2))
+        .setDatasets(Collections.singletonList(dataset))
+        .setAnomalies(Collections.emptyList())
+        .setLoader(new MockPipelineLoader(this.runs, this.outputs));
 
     this.wrapper = new DimensionWrapper(this.provider, this.config, 10, 15);
     this.wrapper.run();

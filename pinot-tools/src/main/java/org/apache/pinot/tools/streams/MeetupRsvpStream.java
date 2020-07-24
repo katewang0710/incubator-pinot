@@ -20,7 +20,6 @@ package org.apache.pinot.tools.streams;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -30,25 +29,22 @@ import javax.websocket.Endpoint;
 import javax.websocket.EndpointConfig;
 import javax.websocket.MessageHandler;
 import javax.websocket.Session;
-import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.utils.JsonUtils;
-import org.apache.pinot.core.realtime.impl.kafka.KafkaStarterUtils;
 import org.apache.pinot.spi.stream.StreamDataProducer;
 import org.apache.pinot.spi.stream.StreamDataProvider;
-import org.apache.pinot.spi.stream.StreamMessageDecoder;
+import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.tools.utils.KafkaStarterUtils;
 import org.glassfish.tyrus.client.ClientManager;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class MeetupRsvpStream {
-
-  private Schema schema;
+  private static final Logger LOGGER = LoggerFactory.getLogger(MeetupRsvpStream.class);
   private StreamDataProducer producer;
   private boolean keepPublishing = true;
   private ClientManager client;
 
-  public MeetupRsvpStream(File schemaFile)
+  public MeetupRsvpStream()
       throws Exception {
-    schema = Schema.fromFile(schemaFile);
     Properties properties = new Properties();
     properties.put("metadata.broker.list", KafkaStarterUtils.DEFAULT_KAFKA_BROKER);
     properties.put("serializer.class", "kafka.serializer.DefaultEncoder");
@@ -64,10 +60,7 @@ public class MeetupRsvpStream {
 
   public void run() {
     try {
-      final ClientEndpointConfig cec = ClientEndpointConfig.Builder.create().build();
-      final StreamMessageDecoder decoder =
-          (StreamMessageDecoder) Class.forName(KafkaStarterUtils.KAFKA_JSON_MESSAGE_DECODER_CLASS_NAME).newInstance();
-      decoder.init(null, schema, null);
+      ClientEndpointConfig cec = ClientEndpointConfig.Builder.create().build();
       client = ClientManager.createClient();
       client.connectToServer(new Endpoint() {
 
@@ -100,6 +93,8 @@ public class MeetupRsvpStream {
                     extracted.set("group_country", group.get("group_country"));
                     extracted.set("group_id", group.get("group_id"));
                     extracted.set("group_name", group.get("group_name"));
+                    extracted.set("group_lat", group.get("group_lat"));
+                    extracted.set("group_lon", group.get("group_lon"));
                   }
 
                   extracted.set("mtime", messageJSON.get("mtime"));
@@ -109,18 +104,18 @@ public class MeetupRsvpStream {
                     producer.produce("meetupRSVPEvents", extracted.toString().getBytes(StandardCharsets.UTF_8));
                   }
                 } catch (Exception e) {
-                  //LOGGER.error("error processing raw event ", e);
+                  LOGGER.error("error processing raw event ", e);
                 }
               }
             });
             session.getBasicRemote().sendText("");
           } catch (IOException e) {
-            //LOGGER.error("found an event where data did not have all the fields, don't care about for quickstart");
+            LOGGER.error("found an event where data did not have all the fields, don't care about for quickstart", e);
           }
         }
       }, cec, new URI("ws://stream.meetup.com/2/rsvps"));
     } catch (Exception e) {
-      //e.printStackTrace();
+      LOGGER.error("encountered an error running the meetupRSVPEvents stream", e);
     }
   }
 }

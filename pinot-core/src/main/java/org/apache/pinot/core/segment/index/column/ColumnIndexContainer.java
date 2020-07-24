@@ -18,9 +18,10 @@
  */
 package org.apache.pinot.core.segment.index.column;
 
-import org.apache.pinot.core.io.reader.DataFileReader;
+import java.io.Closeable;
 import org.apache.pinot.core.segment.index.readers.BloomFilterReader;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
 import org.apache.pinot.core.segment.index.readers.InvertedIndexReader;
 import org.apache.pinot.core.segment.index.readers.NullValueVectorReaderImpl;
 
@@ -28,17 +29,27 @@ import org.apache.pinot.core.segment.index.readers.NullValueVectorReaderImpl;
 /**
  * A container for all the indexes for a column.
  */
-public interface ColumnIndexContainer {
+public interface ColumnIndexContainer extends Closeable {
 
   /**
    * Returns the forward index for the column.
    */
-  DataFileReader getForwardIndex();
+  ForwardIndexReader<?> getForwardIndex();
 
   /**
    * Returns the inverted index for the column, or {@code null} if it does not exist.
    */
-  InvertedIndexReader getInvertedIndex();
+  InvertedIndexReader<?> getInvertedIndex();
+
+  /**
+   * Returns the inverted index for the column, or {@code null} if it does not exist.
+   */
+  InvertedIndexReader<?> getRangeIndex();
+
+  /**
+   * Returns the text index for the column, or {@code null} if it does not exist.
+   */
+  InvertedIndexReader<?> getTextIndex();
 
   /**
    * Returns the dictionary for the column, or {@code null} if it does not exist.

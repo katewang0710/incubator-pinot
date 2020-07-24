@@ -30,21 +30,11 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.spi.data.FieldSpec.DataType;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.function.AggregationFunctionType;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.request.GroupBy;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
 import org.apache.pinot.common.segment.ReadMode;
-import org.apache.pinot.common.utils.request.FilterQueryTree;
-import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.core.common.BlockDocIdIterator;
-import org.apache.pinot.core.common.BlockSingleValIterator;
 import org.apache.pinot.core.common.Constants;
 import org.apache.pinot.core.common.DataSource;
-import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.core.data.aggregator.ValueAggregator;
 import org.apache.pinot.core.data.readers.GenericRowRecordReader;
 import org.apache.pinot.core.indexsegment.IndexSegment;
@@ -52,20 +42,33 @@ import org.apache.pinot.core.indexsegment.generator.SegmentGeneratorConfig;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.core.plan.FilterPlanNode;
 import org.apache.pinot.core.plan.PlanNode;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.FilterContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.apache.pinot.core.startree.plan.StarTreeFilterPlanNode;
 import org.apache.pinot.core.startree.v2.builder.MultipleTreesBuilder;
 import org.apache.pinot.core.startree.v2.builder.MultipleTreesBuilder.BuildMode;
-import org.apache.pinot.core.startree.v2.builder.StarTreeV2BuilderConfig;
-import org.apache.pinot.pql.parsers.Pql2Compiler;
+import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.data.readers.GenericRow;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 
 
 /**
@@ -75,8 +78,8 @@ import static org.testng.Assert.assertEquals;
  * @param <R> Type or raw value
  * @param <A> Type of aggregated value
  */
+@SuppressWarnings({"rawtypes", "unchecked"})
 abstract class BaseStarTreeV2Test<R, A> {
-  private static final Pql2Compiler COMPILER = new Pql2Compiler();
   private static final Random RANDOM = new Random();
 
   private static final File TEMP_DIR = new File(FileUtils.getTempDirectory(), "BaseStarTreeV2Test");
@@ -111,44 +114,45 @@ abstract class BaseStarTreeV2Test<R, A> {
       schemaBuilder.addMetric(METRIC, rawValueType);
     }
     Schema schema = schemaBuilder.build();
+    TableConfig tableConfig = new TableConfigBuilder(TableType.OFFLINE).setTableName(TABLE_NAME).build();
 
     List<GenericRow> segmentRecords = new ArrayList<>(NUM_SEGMENT_RECORDS);
     for (int i = 0; i < NUM_SEGMENT_RECORDS; i++) {
-      Map<String, Object> fieldMap = new HashMap<>();
-      fieldMap.put(DIMENSION_D1, RANDOM.nextInt(DIMENSION_CARDINALITY));
-      fieldMap.put(DIMENSION_D2, RANDOM.nextInt(DIMENSION_CARDINALITY));
-      if (rawValueType != null) {
-        fieldMap.put(METRIC, getRandomRawValue(RANDOM));
-      }
       GenericRow segmentRecord = new GenericRow();
-      segmentRecord.init(fieldMap);
+      segmentRecord.putValue(DIMENSION_D1, RANDOM.nextInt(DIMENSION_CARDINALITY));
+      segmentRecord.putValue(DIMENSION_D2, RANDOM.nextInt(DIMENSION_CARDINALITY));
+      if (rawValueType != null) {
+        segmentRecord.putValue(METRIC, getRandomRawValue(RANDOM));
+      }
       segmentRecords.add(segmentRecord);
     }
 
     SegmentIndexCreationDriverImpl driver = new SegmentIndexCreationDriverImpl();
-    SegmentGeneratorConfig segmentGeneratorConfig = new SegmentGeneratorConfig(schema);
+    SegmentGeneratorConfig segmentGeneratorConfig = new SegmentGeneratorConfig(tableConfig, schema);
     segmentGeneratorConfig.setOutDir(TEMP_DIR.getPath());
     segmentGeneratorConfig.setSegmentName(SEGMENT_NAME);
-    driver.init(segmentGeneratorConfig, new GenericRowRecordReader(segmentRecords, schema));
+    driver.init(segmentGeneratorConfig, new GenericRowRecordReader(segmentRecords));
     driver.build();
 
-    StarTreeV2BuilderConfig starTreeV2BuilderConfig =
-        new StarTreeV2BuilderConfig.Builder().setDimensionsSplitOrder(Arrays.asList(DIMENSION_D1, DIMENSION_D2))
-            .setFunctionColumnPairs(
-                Collections.singleton(new AggregationFunctionColumnPair(_valueAggregator.getAggregationType(), METRIC)))
-            .setMaxLeafRecords(MAX_LEAF_RECORDS).build();
+    StarTreeIndexConfig starTreeIndexConfig = new StarTreeIndexConfig(Arrays.asList(DIMENSION_D1, DIMENSION_D2), null,
+        Collections.singletonList(
+            new AggregationFunctionColumnPair(_valueAggregator.getAggregationType(), METRIC).toColumnName()),
+        MAX_LEAF_RECORDS);
     File indexDir = new File(TEMP_DIR, SEGMENT_NAME);
-
     // Randomly build star-tree using on-heap or off-heap mode
     BuildMode buildMode = RANDOM.nextBoolean() ? BuildMode.ON_HEAP : BuildMode.OFF_HEAP;
-    new MultipleTreesBuilder(Collections.singletonList(starTreeV2BuilderConfig), indexDir, buildMode).build();
+    try (MultipleTreesBuilder builder = new MultipleTreesBuilder(Collections.singletonList(starTreeIndexConfig), false,
+        indexDir, buildMode)) {
+      builder.build();
+    }
 
     _indexSegment = ImmutableSegmentLoader.load(indexDir, ReadMode.mmap);
     _starTreeV2 = _indexSegment.getStarTrees().get(0);
   }
 
   @Test
-  public void testQueries() {
+  public void testQueries()
+      throws IOException {
     AggregationFunctionType aggregationType = _valueAggregator.getAggregationType();
     String aggregation;
     if (aggregationType == AggregationFunctionType.COUNT) {
@@ -175,78 +179,75 @@ abstract class BaseStarTreeV2Test<R, A> {
     FileUtils.deleteDirectory(TEMP_DIR);
   }
 
-  @SuppressWarnings("unchecked")
-  void testQuery(String query) {
-    BrokerRequest brokerRequest = COMPILER.compileToBrokerRequest(query);
+  void testQuery(String query)
+      throws IOException {
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContextFromPQL(query);
 
     // Aggregations
-    List<AggregationInfo> aggregationInfos = brokerRequest.getAggregationsInfo();
-    int numAggregations = aggregationInfos.size();
+    AggregationFunction[] aggregationFunctions = AggregationFunctionUtils.getAggregationFunctions(queryContext);
+    int numAggregations = aggregationFunctions.length;
     List<AggregationFunctionColumnPair> functionColumnPairs = new ArrayList<>(numAggregations);
-    for (AggregationInfo aggregationInfo : aggregationInfos) {
-      functionColumnPairs.add(AggregationFunctionUtils.getFunctionColumnPair(aggregationInfo));
+    for (AggregationFunction aggregationFunction : aggregationFunctions) {
+      AggregationFunctionColumnPair aggregationFunctionColumnPair =
+          AggregationFunctionUtils.getAggregationFunctionColumnPair(aggregationFunction);
+      assertNotNull(aggregationFunctionColumnPair);
+      functionColumnPairs.add(aggregationFunctionColumnPair);
     }
 
     // Group-by columns
     Set<String> groupByColumnSet = new HashSet<>();
-    GroupBy groupBy = brokerRequest.getGroupBy();
-    if (groupBy != null) {
-      for (String expression : groupBy.getExpressions()) {
-        TransformExpressionTree.compileToExpressionTree(expression).getColumns(groupByColumnSet);
+    List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
+    if (groupByExpressions != null) {
+      for (ExpressionContext groupByExpression : groupByExpressions) {
+        groupByExpression.getColumns(groupByColumnSet);
       }
     }
     int numGroupByColumns = groupByColumnSet.size();
     List<String> groupByColumns = new ArrayList<>(groupByColumnSet);
 
-    // Filters
-    FilterQueryTree rootFilterNode = RequestUtils.generateFilterQueryTree(brokerRequest);
+    // Filter
+    FilterContext filter = queryContext.getFilter();
 
     // Extract values with star-tree
     PlanNode starTreeFilterPlanNode;
     if (groupByColumns.isEmpty()) {
-      starTreeFilterPlanNode = new StarTreeFilterPlanNode(_starTreeV2, rootFilterNode, null, null);
+      starTreeFilterPlanNode = new StarTreeFilterPlanNode(_starTreeV2, filter, null, null);
     } else {
-      starTreeFilterPlanNode = new StarTreeFilterPlanNode(_starTreeV2, rootFilterNode, groupByColumnSet, null);
+      starTreeFilterPlanNode = new StarTreeFilterPlanNode(_starTreeV2, filter, groupByColumnSet, null);
     }
-    List<BlockSingleValIterator> starTreeAggregationColumnValueIterators = new ArrayList<>(numAggregations);
+    List<ForwardIndexReader> starTreeAggregationColumnReaders = new ArrayList<>(numAggregations);
     for (AggregationFunctionColumnPair aggregationFunctionColumnPair : functionColumnPairs) {
-      starTreeAggregationColumnValueIterators.add(
-          (BlockSingleValIterator) _starTreeV2.getDataSource(aggregationFunctionColumnPair.toColumnName()).nextBlock()
-              .getBlockValueSet().iterator());
+      starTreeAggregationColumnReaders
+          .add(_starTreeV2.getDataSource(aggregationFunctionColumnPair.toColumnName()).getForwardIndex());
     }
-    List<BlockSingleValIterator> starTreeGroupByColumnValueIterators = new ArrayList<>(numGroupByColumns);
+    List<ForwardIndexReader> starTreeGroupByColumnReaders = new ArrayList<>(numGroupByColumns);
     for (String groupByColumn : groupByColumns) {
-      starTreeGroupByColumnValueIterators.add(
-          (BlockSingleValIterator) _starTreeV2.getDataSource(groupByColumn).nextBlock().getBlockValueSet().iterator());
+      starTreeGroupByColumnReaders.add(_starTreeV2.getDataSource(groupByColumn).getForwardIndex());
     }
     Map<List<Integer>, List<Object>> starTreeResult =
-        computeStarTreeResult(starTreeFilterPlanNode, starTreeAggregationColumnValueIterators,
-            starTreeGroupByColumnValueIterators);
+        computeStarTreeResult(starTreeFilterPlanNode, starTreeAggregationColumnReaders, starTreeGroupByColumnReaders);
 
     // Extract values without star-tree
-    PlanNode nonStarTreeFilterPlanNode = new FilterPlanNode(_indexSegment, brokerRequest);
-    List<BlockSingleValIterator> nonStarTreeAggregationColumnValueIterators = new ArrayList<>(numAggregations);
+    PlanNode nonStarTreeFilterPlanNode = new FilterPlanNode(_indexSegment, queryContext);
+    List<ForwardIndexReader> nonStarTreeAggregationColumnReaders = new ArrayList<>(numAggregations);
     List<Dictionary> nonStarTreeAggregationColumnDictionaries = new ArrayList<>(numAggregations);
     for (AggregationFunctionColumnPair aggregationFunctionColumnPair : functionColumnPairs) {
       if (aggregationFunctionColumnPair.getFunctionType() == AggregationFunctionType.COUNT) {
-        nonStarTreeAggregationColumnValueIterators.add(null);
+        nonStarTreeAggregationColumnReaders.add(null);
         nonStarTreeAggregationColumnDictionaries.add(null);
       } else {
         DataSource dataSource = _indexSegment.getDataSource(aggregationFunctionColumnPair.getColumn());
-        nonStarTreeAggregationColumnValueIterators
-            .add((BlockSingleValIterator) dataSource.nextBlock().getBlockValueSet().iterator());
+        nonStarTreeAggregationColumnReaders.add(dataSource.getForwardIndex());
         nonStarTreeAggregationColumnDictionaries.add(dataSource.getDictionary());
       }
     }
-    List<BlockSingleValIterator> nonStarTreeGroupByColumnValueIterators = new ArrayList<>(numGroupByColumns);
+    List<ForwardIndexReader> nonStarTreeGroupByColumnReaders = new ArrayList<>(numGroupByColumns);
     for (String groupByColumn : groupByColumns) {
-      nonStarTreeGroupByColumnValueIterators.add(
-          (BlockSingleValIterator) _indexSegment.getDataSource(groupByColumn).nextBlock().getBlockValueSet()
-              .iterator());
+      nonStarTreeGroupByColumnReaders.add(_indexSegment.getDataSource(groupByColumn).getForwardIndex());
     }
     Map<List<Integer>, List<Object>> nonStarTreeResult =
-        computeNonStarTreeResult(nonStarTreeFilterPlanNode, nonStarTreeAggregationColumnValueIterators,
-            nonStarTreeAggregationColumnDictionaries, nonStarTreeGroupByColumnValueIterators);
+        computeNonStarTreeResult(nonStarTreeFilterPlanNode, nonStarTreeAggregationColumnReaders,
+            nonStarTreeAggregationColumnDictionaries, nonStarTreeGroupByColumnReaders);
 
     // Assert results
     assertEquals(starTreeResult.size(), nonStarTreeResult.size());
@@ -261,104 +262,150 @@ abstract class BaseStarTreeV2Test<R, A> {
     }
   }
 
-  @SuppressWarnings("unchecked")
   private Map<List<Integer>, List<Object>> computeStarTreeResult(PlanNode starTreeFilterPlanNode,
-      List<BlockSingleValIterator> aggregationColumnValueIterators,
-      List<BlockSingleValIterator> groupByColumnValueIterators) {
+      List<ForwardIndexReader> aggregationColumnReaders, List<ForwardIndexReader> groupByColumnReaders)
+      throws IOException {
     Map<List<Integer>, List<Object>> result = new HashMap<>();
-    int numAggregations = aggregationColumnValueIterators.size();
-    int numGroupByColumns = groupByColumnValueIterators.size();
-    BlockDocIdIterator docIdIterator = starTreeFilterPlanNode.run().nextBlock().getBlockDocIdSet().iterator();
-    int docId;
-    while ((docId = docIdIterator.next()) != Constants.EOF) {
-      // Array of dictionary Ids (zero-length array for non-group-by queries)
-      List<Integer> group = new ArrayList<>(numGroupByColumns);
-      for (BlockSingleValIterator valueIterator : groupByColumnValueIterators) {
-        valueIterator.skipTo(docId);
-        group.add(valueIterator.nextIntVal());
+    int numAggregations = aggregationColumnReaders.size();
+    int numGroupByColumns = groupByColumnReaders.size();
+
+    List<ForwardIndexReaderContext> aggregationColumnReaderContexts = new ArrayList<>(numAggregations);
+    List<ForwardIndexReaderContext> groupByColumnReaderContexts = new ArrayList<>(numGroupByColumns);
+    try {
+      for (ForwardIndexReader aggregationColumnReader : aggregationColumnReaders) {
+        aggregationColumnReaderContexts.add(aggregationColumnReader.createContext());
       }
-      List<Object> values = result.computeIfAbsent(group, k -> new ArrayList<>(numAggregations));
-      if (values.isEmpty()) {
-        for (BlockSingleValIterator valueIterator : aggregationColumnValueIterators) {
-          valueIterator.skipTo(docId);
-          values.add(getNextAggregatedValue(valueIterator));
+      for (ForwardIndexReader groupByColumnReader : groupByColumnReaders) {
+        groupByColumnReaderContexts.add(groupByColumnReader.createContext());
+      }
+
+      BlockDocIdIterator docIdIterator = starTreeFilterPlanNode.run().nextBlock().getBlockDocIdSet().iterator();
+      int docId;
+      while ((docId = docIdIterator.next()) != Constants.EOF) {
+        // Array of dictionary ids (zero-length array for non-group-by queries)
+        List<Integer> group = new ArrayList<>(numGroupByColumns);
+        for (int i = 0; i < numGroupByColumns; i++) {
+          group.add(groupByColumnReaders.get(i).getDictId(docId, groupByColumnReaderContexts.get(i)));
         }
-      } else {
-        for (int i = 0; i < numAggregations; i++) {
-          Object value = values.get(i);
-          BlockSingleValIterator valueIterator = aggregationColumnValueIterators.get(i);
-          valueIterator.skipTo(docId);
-          values.set(i, _valueAggregator.applyAggregatedValue(value, getNextAggregatedValue(valueIterator)));
+        List<Object> values = result.computeIfAbsent(group, k -> new ArrayList<>(numAggregations));
+        if (values.isEmpty()) {
+          for (int i = 0; i < numAggregations; i++) {
+            values.add(
+                getAggregatedValue(docId, aggregationColumnReaders.get(i), aggregationColumnReaderContexts.get(i)));
+          }
+        } else {
+          for (int i = 0; i < numAggregations; i++) {
+            Object value = values.get(i);
+            values.set(i, _valueAggregator.applyAggregatedValue(value,
+                getAggregatedValue(docId, aggregationColumnReaders.get(i), aggregationColumnReaderContexts.get(i))));
+          }
+        }
+      }
+      return result;
+    } finally {
+      for (ForwardIndexReaderContext readerContext : aggregationColumnReaderContexts) {
+        if (readerContext != null) {
+          readerContext.close();
+        }
+      }
+      for (ForwardIndexReaderContext readerContext : groupByColumnReaderContexts) {
+        if (readerContext != null) {
+          readerContext.close();
         }
       }
     }
-    return result;
   }
 
-  private Object getNextAggregatedValue(BlockSingleValIterator valueIterator) {
+  private Object getAggregatedValue(int docId, ForwardIndexReader reader, ForwardIndexReaderContext readerContext) {
     switch (_aggregatedValueType) {
       case LONG:
-        return valueIterator.nextLongVal();
+        return reader.getLong(docId, readerContext);
       case DOUBLE:
-        return valueIterator.nextDoubleVal();
+        return reader.getDouble(docId, readerContext);
       case BYTES:
-        return _valueAggregator.deserializeAggregatedValue(valueIterator.nextBytesVal());
+        return _valueAggregator.deserializeAggregatedValue(reader.getBytes(docId, readerContext));
       default:
         throw new IllegalStateException();
     }
   }
 
-  @SuppressWarnings("unchecked")
   private Map<List<Integer>, List<Object>> computeNonStarTreeResult(PlanNode nonStarTreeFilterPlanNode,
-      List<BlockSingleValIterator> aggregationColumnValueIterators, List<Dictionary> aggregationColumnDictionaries,
-      List<BlockSingleValIterator> groupByColumnValueIterators) {
+      List<ForwardIndexReader> aggregationColumnReaders, List<Dictionary> aggregationColumnDictionaries,
+      List<ForwardIndexReader> groupByColumnReaders)
+      throws IOException {
     Map<List<Integer>, List<Object>> result = new HashMap<>();
-    int numAggregations = aggregationColumnValueIterators.size();
-    int numGroupByColumns = groupByColumnValueIterators.size();
-    BlockDocIdIterator docIdIterator = nonStarTreeFilterPlanNode.run().nextBlock().getBlockDocIdSet().iterator();
-    int docId;
-    while ((docId = docIdIterator.next()) != Constants.EOF) {
-      // Array of dictionary Ids (zero-length array for non-group-by queries)
-      List<Integer> group = new ArrayList<>(numGroupByColumns);
-      for (BlockSingleValIterator valueIterator : groupByColumnValueIterators) {
-        valueIterator.skipTo(docId);
-        group.add(valueIterator.nextIntVal());
+    int numAggregations = aggregationColumnReaders.size();
+    int numGroupByColumns = groupByColumnReaders.size();
+
+    List<ForwardIndexReaderContext> aggregationColumnReaderContexts = new ArrayList<>(numAggregations);
+    List<ForwardIndexReaderContext> groupByColumnReaderContexts = new ArrayList<>(numGroupByColumns);
+    try {
+      for (ForwardIndexReader aggregationColumnReader : aggregationColumnReaders) {
+        if (aggregationColumnReader != null) {
+          aggregationColumnReaderContexts.add(aggregationColumnReader.createContext());
+        } else {
+          aggregationColumnReaderContexts.add(null);
+        }
       }
-      List<Object> values = result.computeIfAbsent(group, k -> new ArrayList<>(numAggregations));
-      if (values.isEmpty()) {
-        for (int i = 0; i < numAggregations; i++) {
-          BlockSingleValIterator valueIterator = aggregationColumnValueIterators.get(i);
-          if (valueIterator == null) {
-            // COUNT aggregation function
-            values.add(1L);
-          } else {
-            valueIterator.skipTo(docId);
-            Object rawValue = getNextRawValue(valueIterator, aggregationColumnDictionaries.get(i));
-            values.add(_valueAggregator.getInitialAggregatedValue(rawValue));
+      for (ForwardIndexReader groupByColumnReader : groupByColumnReaders) {
+        groupByColumnReaderContexts.add(groupByColumnReader.createContext());
+      }
+
+      BlockDocIdIterator docIdIterator = nonStarTreeFilterPlanNode.run().nextBlock().getBlockDocIdSet().iterator();
+      int docId;
+      while ((docId = docIdIterator.next()) != Constants.EOF) {
+        // Array of dictionary ids (zero-length array for non-group-by queries)
+        List<Integer> group = new ArrayList<>(numGroupByColumns);
+        for (int i = 0; i < numGroupByColumns; i++) {
+          group.add(groupByColumnReaders.get(i).getDictId(docId, groupByColumnReaderContexts.get(i)));
+        }
+        List<Object> values = result.computeIfAbsent(group, k -> new ArrayList<>(numAggregations));
+        if (values.isEmpty()) {
+          for (int i = 0; i < numAggregations; i++) {
+            ForwardIndexReader aggregationColumnReader = aggregationColumnReaders.get(i);
+            if (aggregationColumnReader == null) {
+              // COUNT aggregation function
+              values.add(1L);
+            } else {
+              Object rawValue = getNextRawValue(docId, aggregationColumnReader, aggregationColumnReaderContexts.get(i),
+                  aggregationColumnDictionaries.get(i));
+              values.add(_valueAggregator.getInitialAggregatedValue(rawValue));
+            }
+          }
+        } else {
+          for (int i = 0; i < numAggregations; i++) {
+            Object value = values.get(i);
+            ForwardIndexReader aggregationColumnReader = aggregationColumnReaders.get(i);
+            if (aggregationColumnReader == null) {
+              // COUNT aggregation function
+              value = (Long) value + 1;
+            } else {
+              Object rawValue = getNextRawValue(docId, aggregationColumnReader, aggregationColumnReaderContexts.get(i),
+                  aggregationColumnDictionaries.get(i));
+              value = _valueAggregator.applyRawValue(value, rawValue);
+            }
+            values.set(i, value);
           }
         }
-      } else {
-        for (int i = 0; i < numAggregations; i++) {
-          Object value = values.get(i);
-          BlockSingleValIterator valueIterator = aggregationColumnValueIterators.get(i);
-          if (valueIterator == null) {
-            // COUNT aggregation function
-            value = (Long) value + 1;
-          } else {
-            valueIterator.skipTo(docId);
-            Object rawValue = getNextRawValue(valueIterator, aggregationColumnDictionaries.get(i));
-            value = _valueAggregator.applyRawValue(value, rawValue);
-          }
-          values.set(i, value);
+      }
+      return result;
+    } finally {
+      for (ForwardIndexReaderContext readerContext : aggregationColumnReaderContexts) {
+        if (readerContext != null) {
+          readerContext.close();
+        }
+      }
+      for (ForwardIndexReaderContext readerContext : groupByColumnReaderContexts) {
+        if (readerContext != null) {
+          readerContext.close();
         }
       }
     }
-    return result;
   }
 
-  private Object getNextRawValue(BlockSingleValIterator valueIterator, Dictionary dictionary) {
-    int dictId = valueIterator.nextIntVal();
-    return dictionary.get(dictId);
+  private Object getNextRawValue(int docId, ForwardIndexReader reader, ForwardIndexReaderContext readerContext,
+      Dictionary dictionary) {
+    return dictionary.get(reader.getDictId(docId, readerContext));
   }
 
   abstract ValueAggregator<R, A> getValueAggregator();

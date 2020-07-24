@@ -19,6 +19,7 @@
 package org.apache.pinot.tools.scan.query;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -32,18 +33,20 @@ import org.apache.pinot.common.request.GroupBy;
 import org.apache.pinot.common.segment.ReadMode;
 import org.apache.pinot.common.utils.request.FilterQueryTree;
 import org.apache.pinot.common.utils.request.RequestUtils;
-import org.apache.pinot.core.common.BlockMultiValIterator;
-import org.apache.pinot.core.common.BlockSingleValIterator;
+import org.apache.pinot.core.common.DataSource;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegment;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.core.query.utils.Pair;
-import org.apache.pinot.core.segment.index.ColumnMetadata;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
+import org.apache.pinot.core.segment.index.metadata.ColumnMetadata;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
+@SuppressWarnings({"rawtypes", "unchecked"})
 class SegmentQueryProcessor {
   private static final Logger LOGGER = LoggerFactory.getLogger(SegmentQueryProcessor.class);
 
@@ -114,16 +117,16 @@ class SegmentQueryProcessor {
       if (brokerRequest.isSetSelections()) {
         List<String> columns = brokerRequest.getSelections().getSelectionColumns();
         if (columns.contains("*")) {
-          columns = new ArrayList<>(_immutableSegment.getPhysicalColumnNames());
+          columns = new ArrayList<>(_immutableSegment.getColumnNames());
         }
         List<Pair> selectionColumns = new ArrayList<>();
-        Set<String> columSet = new HashSet<>();
+        Set<String> columnSet = new HashSet<>();
 
         // Collect a unique list of columns, in case input has duplicates.
         for (String column : columns) {
-          if (!columSet.contains(column)) {
+          if (!columnSet.contains(column) && column.charAt(0) != '$') {
             selectionColumns.add(new Pair(column, null));
-            columSet.add(column);
+            columnSet.add(column);
           }
         }
         Selection selection = new Selection(_immutableSegment, _metadata, filteredDocIds, selectionColumns);
@@ -141,9 +144,7 @@ class SegmentQueryProcessor {
     Set<String> allColumns = _metadata.getAllColumns();
     if (brokerRequest.isSetAggregationsInfo()) {
       for (AggregationInfo aggregationInfo : brokerRequest.getAggregationsInfo()) {
-        Map<String, String> aggregationParams = aggregationInfo.getAggregationParams();
-
-        for (String column : aggregationParams.values()) {
+        for (String column : aggregationInfo.getExpressions()) {
           if (column != null && !column.isEmpty() && !column.equals("*") && !allColumns.contains(column)) {
             LOGGER.debug("Skipping segment '{}', as it does not have column '{}'", _metadata.getName(), column);
             return true;
@@ -267,36 +268,48 @@ class SegmentQueryProcessor {
 
   private List<Integer> evaluatePredicate(List<Integer> inputDocIds, String column, PredicateFilter predicateFilter) {
     List<Integer> result = new ArrayList<>();
-    if (!_mvColumns.contains(column)) {
-      BlockSingleValIterator bvIter =
-          (BlockSingleValIterator) _immutableSegment.getDataSource(column).nextBlock().getBlockValueSet().iterator();
+    DataSource dataSource = _immutableSegment.getDataSource(column);
+    ForwardIndexReader reader = dataSource.getForwardIndex();
+    try (ForwardIndexReaderContext readerContext = reader.createContext()) {
+      if (!_mvColumns.contains(column)) {
+        if (inputDocIds != null) {
+          for (int docId : inputDocIds) {
+            if (predicateFilter.apply(reader.getDictId(docId, readerContext))) {
+              result.add(docId);
+            }
+          }
+        } else {
+          int numDocs = dataSource.getDataSourceMetadata().getNumDocs();
+          for (int docId = 0; docId < numDocs; docId++) {
+            if (predicateFilter.apply(reader.getDictId(docId, readerContext))) {
+              result.add(docId);
+            }
+          }
+        }
+      } else {
+        int[] dictIdBuffer = _mvColumnArrayMap.get(column);
 
-      int i = 0;
-      while (bvIter.hasNext() && (inputDocIds == null || i < inputDocIds.size())) {
-        int docId = (inputDocIds != null) ? inputDocIds.get(i++) : i++;
-        bvIter.skipTo(docId);
-        if (predicateFilter.apply(bvIter.nextIntVal())) {
-          result.add(docId);
+        if (inputDocIds != null) {
+          for (int docId : inputDocIds) {
+            int length = reader.getDictIdMV(docId, dictIdBuffer, readerContext);
+            if (predicateFilter.apply(dictIdBuffer, length)) {
+              result.add(docId);
+            }
+          }
+        } else {
+          int numDocs = dataSource.getDataSourceMetadata().getNumDocs();
+          for (int docId = 0; docId < numDocs; docId++) {
+            int length = reader.getDictIdMV(docId, dictIdBuffer, readerContext);
+            if (predicateFilter.apply(dictIdBuffer, length)) {
+              result.add(docId);
+            }
+          }
         }
       }
-    } else {
-      BlockMultiValIterator bvIter =
-          (BlockMultiValIterator) _immutableSegment.getDataSource(column).nextBlock().getBlockValueSet().iterator();
-
-      int i = 0;
-      while (bvIter.hasNext() && (inputDocIds == null || i < inputDocIds.size())) {
-        int docId = (inputDocIds != null) ? inputDocIds.get(i++) : i++;
-        bvIter.skipTo(docId);
-
-        int[] dictIds = _mvColumnArrayMap.get(column);
-        int numMVValues = bvIter.nextIntVal(dictIds);
-
-        if (predicateFilter.apply(dictIds, numMVValues)) {
-          result.add(docId);
-        }
-      }
+      return result;
+    } catch (IOException e) {
+      throw new RuntimeException(e);
     }
-    return result;
   }
 
   public String getSegmentName() {

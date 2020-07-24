@@ -20,6 +20,8 @@ package org.apache.pinot.controller.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.pinot.common.protocols.SegmentCompletionProtocol;
+import org.apache.pinot.spi.stream.LongMsgOffset;
+import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.testng.annotations.Test;
 
@@ -30,7 +32,7 @@ import static org.testng.Assert.assertTrue;
 
 
 public class SegmentCompletionProtocolDeserTest {
-  private final int OFFSET = 1;
+  private final StreamPartitionMsgOffset OFFSET = new LongMsgOffset(1L);
   private final long BUILD_TIME_MILLIS = 123;
   private final String SEGMENT_LOCATION = "file.tmp";
   private final String CONTROLLER_VIP_URL = "http://localhost:8998";
@@ -39,13 +41,14 @@ public class SegmentCompletionProtocolDeserTest {
   public void testCompleteResponseParams() {
     // Test with all params
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withSegmentLocation(SEGMENT_LOCATION).withSplitCommit(true)
             .withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     assertEquals(response.getBuildTimeSeconds(), BUILD_TIME_MILLIS);
-    assertEquals(response.getOffset(), OFFSET);
+    assertEquals(new LongMsgOffset(response.getStreamPartitionMsgOffset()).compareTo(OFFSET), 0);
     assertEquals(response.getSegmentLocation(), SEGMENT_LOCATION);
     assertTrue(response.isSplitCommit());
     assertEquals(response.getStatus(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
@@ -55,12 +58,13 @@ public class SegmentCompletionProtocolDeserTest {
   public void testIncompleteResponseParams() {
     // Test with reduced params
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     assertEquals(response.getBuildTimeSeconds(), BUILD_TIME_MILLIS);
-    assertEquals(response.getOffset(), OFFSET);
+    assertEquals(new LongMsgOffset(response.getStreamPartitionMsgOffset()).compareTo(OFFSET), 0);
     assertNull(response.getSegmentLocation());
     assertFalse(response.isSplitCommit());
     assertEquals(response.getStatus(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
@@ -70,14 +74,15 @@ public class SegmentCompletionProtocolDeserTest {
   public void testJsonResponseWithAllParams() {
     // Test with all params
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withSegmentLocation(SEGMENT_LOCATION).withSplitCommit(true).withControllerVipUrl(CONTROLLER_VIP_URL)
             .withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     JsonNode jsonNode = JsonUtils.objectToJsonNode(response);
 
-    assertEquals(jsonNode.get("offset").asInt(), OFFSET);
+    assertEquals(jsonNode.get("offset").asText(), OFFSET.toString());
     assertEquals(jsonNode.get("segmentLocation").asText(), SEGMENT_LOCATION);
     assertTrue(jsonNode.get("isSplitCommitType").asBoolean());
     assertEquals(jsonNode.get("status").asText(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT.toString());
@@ -87,13 +92,14 @@ public class SegmentCompletionProtocolDeserTest {
   @Test
   public void testJsonNullSegmentLocationAndVip() {
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withSplitCommit(false).withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     JsonNode jsonNode = JsonUtils.objectToJsonNode(response);
 
-    assertEquals(jsonNode.get("offset").asInt(), OFFSET);
+    assertEquals(jsonNode.get("offset").asText(), OFFSET.toString());
     assertNull(jsonNode.get("segmentLocation"));
     assertFalse(jsonNode.get("isSplitCommitType").asBoolean());
     assertEquals(jsonNode.get("status").asText(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT.toString());
@@ -103,13 +109,14 @@ public class SegmentCompletionProtocolDeserTest {
   @Test
   public void testJsonResponseWithoutSplitCommit() {
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withSplitCommit(false).withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     JsonNode jsonNode = JsonUtils.objectToJsonNode(response);
 
-    assertEquals(jsonNode.get("offset").asInt(), OFFSET);
+    assertEquals(jsonNode.get("offset").asText(), OFFSET.toString());
     assertNull(jsonNode.get("segmentLocation"));
     assertFalse(jsonNode.get("isSplitCommitType").asBoolean());
     assertEquals(jsonNode.get("status").asText(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT.toString());
@@ -120,14 +127,15 @@ public class SegmentCompletionProtocolDeserTest {
   public void testJsonResponseWithSegmentLocationNullVip() {
     // Should never happen because if split commit, should have both location and VIP, but testing deserialization regardless
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withSegmentLocation(SEGMENT_LOCATION).withSplitCommit(false)
             .withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     JsonNode jsonNode = JsonUtils.objectToJsonNode(response);
 
-    assertEquals(jsonNode.get("offset").asInt(), OFFSET);
+    assertEquals(jsonNode.get("offset").asText(), OFFSET.toString());
     assertEquals(jsonNode.get("segmentLocation").asText(), SEGMENT_LOCATION);
     assertFalse(jsonNode.get("isSplitCommitType").asBoolean());
     assertEquals(jsonNode.get("status").asText(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT.toString());
@@ -138,14 +146,15 @@ public class SegmentCompletionProtocolDeserTest {
   public void testJsonResponseWithVipAndNullSegmentLocation() {
     // Should never happen because if split commit, should have both location and VIP, but testing deserialization regardless
     SegmentCompletionProtocol.Response.Params params =
-        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS).withOffset(OFFSET)
+        new SegmentCompletionProtocol.Response.Params().withBuildTimeSeconds(BUILD_TIME_MILLIS)
+            .withStreamPartitionMsgOffset(OFFSET.toString())
             .withControllerVipUrl(CONTROLLER_VIP_URL).withSplitCommit(false)
             .withStatus(SegmentCompletionProtocol.ControllerResponseStatus.COMMIT);
 
     SegmentCompletionProtocol.Response response = new SegmentCompletionProtocol.Response(params);
     JsonNode jsonNode = JsonUtils.objectToJsonNode(response);
 
-    assertEquals(jsonNode.get("offset").asInt(), OFFSET);
+    assertEquals(jsonNode.get("offset").asText(), OFFSET.toString());
     assertNull(jsonNode.get("segmentLocation"));
     assertFalse(jsonNode.get("isSplitCommitType").asBoolean());
     assertEquals(jsonNode.get("status").asText(), SegmentCompletionProtocol.ControllerResponseStatus.COMMIT.toString());

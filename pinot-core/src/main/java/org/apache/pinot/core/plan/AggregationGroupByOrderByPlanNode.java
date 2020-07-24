@@ -18,112 +18,97 @@
  */
 package org.apache.pinot.core.plan;
 
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import javax.annotation.Nonnull;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.request.GroupBy;
-import org.apache.pinot.common.request.transform.TransformExpressionTree;
-import org.apache.pinot.common.utils.request.FilterQueryTree;
-import org.apache.pinot.common.utils.request.RequestUtils;
 import org.apache.pinot.core.indexsegment.IndexSegment;
-import org.apache.pinot.core.operator.query.AggregationGroupByOperator;
 import org.apache.pinot.core.operator.query.AggregationGroupByOrderByOperator;
-import org.apache.pinot.core.query.aggregation.AggregationFunctionContext;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.FilterContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.startree.StarTreeUtils;
 import org.apache.pinot.core.startree.plan.StarTreeTransformPlanNode;
 import org.apache.pinot.core.startree.v2.AggregationFunctionColumnPair;
 import org.apache.pinot.core.startree.v2.StarTreeV2;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 
 /**
  * The <code>AggregationGroupByOrderByPlanNode</code> class provides the execution plan for aggregation group-by order-by query on a
  * single segment.
  */
+@SuppressWarnings("rawtypes")
 public class AggregationGroupByOrderByPlanNode implements PlanNode {
-  private static final Logger LOGGER = LoggerFactory.getLogger(AggregationGroupByOrderByPlanNode.class);
-
   private final IndexSegment _indexSegment;
   private final int _maxInitialResultHolderCapacity;
   private final int _numGroupsLimit;
-  private final List<AggregationInfo> _aggregationInfos;
-  private final AggregationFunctionContext[] _functionContexts;
-  private final GroupBy _groupBy;
+  private final AggregationFunction[] _aggregationFunctions;
+  private final ExpressionContext[] _groupByExpressions;
   private final TransformPlanNode _transformPlanNode;
   private final StarTreeTransformPlanNode _starTreeTransformPlanNode;
 
-  public AggregationGroupByOrderByPlanNode(@Nonnull IndexSegment indexSegment, @Nonnull BrokerRequest brokerRequest,
+  public AggregationGroupByOrderByPlanNode(IndexSegment indexSegment, QueryContext queryContext,
       int maxInitialResultHolderCapacity, int numGroupsLimit) {
     _indexSegment = indexSegment;
     _maxInitialResultHolderCapacity = maxInitialResultHolderCapacity;
     _numGroupsLimit = numGroupsLimit;
-    _aggregationInfos = brokerRequest.getAggregationsInfo();
-    _functionContexts =
-        AggregationFunctionUtils.getAggregationFunctionContexts(brokerRequest, indexSegment.getSegmentMetadata());
-    _groupBy = brokerRequest.getGroupBy();
+    _aggregationFunctions = AggregationFunctionUtils.getAggregationFunctions(queryContext);
+    List<ExpressionContext> groupByExpressions = queryContext.getGroupByExpressions();
+    assert groupByExpressions != null;
+    _groupByExpressions = groupByExpressions.toArray(new ExpressionContext[0]);
 
     List<StarTreeV2> starTrees = indexSegment.getStarTrees();
     if (starTrees != null) {
-      if (!StarTreeUtils.isStarTreeDisabled(brokerRequest)) {
-        Set<AggregationFunctionColumnPair> aggregationFunctionColumnPairs = new HashSet<>();
-        for (AggregationInfo aggregationInfo : _aggregationInfos) {
-          aggregationFunctionColumnPairs.add(AggregationFunctionUtils.getFunctionColumnPair(aggregationInfo));
+      if (!StarTreeUtils.isStarTreeDisabled(queryContext)) {
+        int numAggregationFunctions = _aggregationFunctions.length;
+        AggregationFunctionColumnPair[] aggregationFunctionColumnPairs =
+            new AggregationFunctionColumnPair[numAggregationFunctions];
+        boolean hasUnsupportedAggregationFunction = false;
+        for (int i = 0; i < numAggregationFunctions; i++) {
+          AggregationFunctionColumnPair aggregationFunctionColumnPair =
+              AggregationFunctionUtils.getAggregationFunctionColumnPair(_aggregationFunctions[i]);
+          if (aggregationFunctionColumnPair != null) {
+            aggregationFunctionColumnPairs[i] = aggregationFunctionColumnPair;
+          } else {
+            hasUnsupportedAggregationFunction = true;
+            break;
+          }
         }
-        Set<TransformExpressionTree> groupByExpressions = new HashSet<>();
-        for (String expression : _groupBy.getExpressions()) {
-          groupByExpressions.add(TransformExpressionTree.compileToExpressionTree(expression));
-        }
-        FilterQueryTree rootFilterNode = RequestUtils.generateFilterQueryTree(brokerRequest);
-        for (StarTreeV2 starTreeV2 : starTrees) {
-          if (StarTreeUtils
-              .isFitForStarTree(starTreeV2.getMetadata(), aggregationFunctionColumnPairs, groupByExpressions,
-                  rootFilterNode)) {
-            _transformPlanNode = null;
-            _starTreeTransformPlanNode =
-                new StarTreeTransformPlanNode(starTreeV2, aggregationFunctionColumnPairs, groupByExpressions,
-                    rootFilterNode, brokerRequest.getDebugOptions());
-            return;
+        if (!hasUnsupportedAggregationFunction) {
+          FilterContext filter = queryContext.getFilter();
+          for (StarTreeV2 starTreeV2 : starTrees) {
+            if (StarTreeUtils
+                .isFitForStarTree(starTreeV2.getMetadata(), aggregationFunctionColumnPairs, _groupByExpressions,
+                    filter)) {
+              _transformPlanNode = null;
+              _starTreeTransformPlanNode =
+                  new StarTreeTransformPlanNode(starTreeV2, aggregationFunctionColumnPairs, _groupByExpressions, filter,
+                      queryContext.getDebugOptions());
+              return;
+            }
           }
         }
       }
     }
 
-    _transformPlanNode = new TransformPlanNode(_indexSegment, brokerRequest);
+    Set<ExpressionContext> expressionsToTransform =
+        AggregationFunctionUtils.collectExpressionsToTransform(_aggregationFunctions, _groupByExpressions);
+    _transformPlanNode =
+        new TransformPlanNode(_indexSegment, queryContext, expressionsToTransform, DocIdSetPlanNode.MAX_DOC_PER_CALL);
     _starTreeTransformPlanNode = null;
   }
 
   @Override
   public AggregationGroupByOrderByOperator run() {
-    int numTotalRawDocs = _indexSegment.getSegmentMetadata().getTotalRawDocs();
+    int numTotalDocs = _indexSegment.getSegmentMetadata().getTotalDocs();
     if (_transformPlanNode != null) {
       // Do not use star-tree
-      return new AggregationGroupByOrderByOperator(_functionContexts, _groupBy, _maxInitialResultHolderCapacity,
-          _numGroupsLimit, _transformPlanNode.run(), numTotalRawDocs, false);
+      return new AggregationGroupByOrderByOperator(_aggregationFunctions, _groupByExpressions,
+          _maxInitialResultHolderCapacity, _numGroupsLimit, _transformPlanNode.run(), numTotalDocs, false);
     } else {
       // Use star-tree
-      return new AggregationGroupByOrderByOperator(_functionContexts, _groupBy, _maxInitialResultHolderCapacity,
-          _numGroupsLimit, _starTreeTransformPlanNode.run(), numTotalRawDocs, true);
-    }
-  }
-
-  @Override
-  public void showTree(String prefix) {
-    LOGGER.debug(prefix + "Aggregation Group-by Plan Node:");
-    LOGGER.debug(prefix + "Operator: AggregationGroupByOperator");
-    LOGGER.debug(prefix + "Argument 0: IndexSegment - " + _indexSegment.getSegmentName());
-    LOGGER.debug(prefix + "Argument 1: Aggregations - " + _aggregationInfos);
-    LOGGER.debug(prefix + "Argument 2: GroupBy - " + _groupBy);
-    if (_transformPlanNode != null) {
-      LOGGER.debug(prefix + "Argument 3: TransformPlanNode -");
-      _transformPlanNode.showTree(prefix + "    ");
-    } else {
-      LOGGER.debug(prefix + "Argument 3: StarTreeTransformPlanNode -");
-      _starTreeTransformPlanNode.showTree(prefix + "    ");
+      return new AggregationGroupByOrderByOperator(_aggregationFunctions, _groupByExpressions,
+          _maxInitialResultHolderCapacity, _numGroupsLimit, _starTreeTransformPlanNode.run(), numTotalDocs, true);
     }
   }
 }

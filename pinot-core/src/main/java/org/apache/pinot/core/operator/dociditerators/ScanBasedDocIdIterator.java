@@ -19,29 +19,29 @@
 package org.apache.pinot.core.operator.dociditerators;
 
 import org.apache.pinot.core.common.BlockDocIdIterator;
+import org.roaringbitmap.buffer.ImmutableRoaringBitmap;
 import org.roaringbitmap.buffer.MutableRoaringBitmap;
 
 
 /**
- * All scan based filter iterators must implement this interface. This allows interesection to be
+ * All scan-based filter iterators should implement this interface to allow intersection (AND operation) to be
  * optimized.
- * For example, if the we have two iterators one index based and another scan based, instead of
- * iterating on both iterators while doing intersection, we iterate of index based and simply look
- * up on scan based iterator to check if docId matches
+ * <p>When there are at least one index-base BlockDocIdIterator (SortedDocIdIterator or BitmapBasedDocIdIterator) and at
+ * least one ScanBasedDocIdIterator, instead of iterating on each BlockDocIdIterator (we should avoid iterating on
+ * ScanBasedDocIdIterator because that requires a lot of document scans), it can be optimized by first constructing a
+ * bitmap of matching document ids from the index-based BlockDocIdIterators, and let ScanBasedDocIdIterator only scan
+ * the matching document ids from the index-base BlockDocIdIterators.
  */
 public interface ScanBasedDocIdIterator extends BlockDocIdIterator {
-  /**
-   * @param docId
-   * @return true if the doc id matches
-   */
-  boolean isMatch(int docId);
-
-  MutableRoaringBitmap applyAnd(MutableRoaringBitmap answer);
 
   /**
-   * Get number of entries scanned.
-   *
-   * @return number of entries scanned.
+   * Applies AND operation to the given bitmap of document ids, returns a bitmap of the matching document ids.
    */
-  int getNumEntriesScanned();
+  MutableRoaringBitmap applyAnd(ImmutableRoaringBitmap docIds);
+
+  /**
+   * Returns the number of entries (SV value contains one entry, MV value contains multiple entries) scanned during the
+   * iteration. This method should be called after the iteration is done.
+   */
+  long getNumEntriesScanned();
 }

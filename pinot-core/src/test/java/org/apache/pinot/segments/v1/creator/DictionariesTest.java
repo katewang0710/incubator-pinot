@@ -30,7 +30,9 @@ import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.avro.data.readers.AvroUtils;
+import org.apache.pinot.plugin.inputformat.avro.AvroUtils;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
@@ -57,6 +59,7 @@ import org.apache.pinot.core.segment.index.readers.FloatDictionary;
 import org.apache.pinot.core.segment.index.readers.IntDictionary;
 import org.apache.pinot.core.segment.index.readers.LongDictionary;
 import org.apache.pinot.core.segment.index.readers.StringDictionary;
+import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.util.TestUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -70,6 +73,8 @@ public class DictionariesTest {
   static Map<String, Set<Object>> uniqueEntries;
 
   private static File segmentDirectory;
+
+  private static TableConfig _tableConfig ;
 
   @AfterClass
   public static void cleanup() {
@@ -88,6 +93,7 @@ public class DictionariesTest {
     final SegmentGeneratorConfig config = SegmentTestUtils
         .getSegmentGenSpecWithSchemAndProjectedColumns(new File(filePath), INDEX_DIR, "time_day", TimeUnit.DAYS,
             "test");
+    _tableConfig = config.getTableConfig();
 
     // The segment generation code in SegmentColumnarIndexCreator will throw
     // exception if start and end time in time column are not in acceptable
@@ -203,19 +209,19 @@ public class DictionariesTest {
     AbstractColumnStatisticsCollector statsCollector = buildStatsCollector("column1", DataType.INT);
     statsCollector.collect(1);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(2);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(3L);
-    Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4d);
+    statsCollector.collect(3);
     Assert.assertTrue(statsCollector.isSorted());
     statsCollector.collect(4);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(4);
+    Assert.assertTrue(statsCollector.isSorted());
+    statsCollector.collect(2);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(40d);
+    statsCollector.collect(40);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(20d);
+    statsCollector.collect(20);
     Assert.assertFalse(statsCollector.isSorted());
     statsCollector.seal();
     Assert.assertEquals(statsCollector.getCardinality(), 6);
@@ -227,21 +233,21 @@ public class DictionariesTest {
   @Test
   public void testFloatColumnPreIndexStatsCollector() {
     AbstractColumnStatisticsCollector statsCollector = buildStatsCollector("column1", DataType.FLOAT);
-    statsCollector.collect(1);
+    statsCollector.collect(1f);
     Assert.assertTrue(statsCollector.isSorted());
     statsCollector.collect(2f);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(3L);
+    statsCollector.collect(3f);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4d);
+    statsCollector.collect(4f);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4);
+    statsCollector.collect(4f);
     Assert.assertTrue(statsCollector.isSorted());
     statsCollector.collect(2f);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(40d);
+    statsCollector.collect(40f);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(20d);
+    statsCollector.collect(20f);
     Assert.assertFalse(statsCollector.isSorted());
     statsCollector.seal();
     Assert.assertEquals(statsCollector.getCardinality(), 6);
@@ -253,21 +259,21 @@ public class DictionariesTest {
   @Test
   public void testLongColumnPreIndexStatsCollector() {
     AbstractColumnStatisticsCollector statsCollector = buildStatsCollector("column1", DataType.LONG);
-    statsCollector.collect(1);
+    statsCollector.collect(1L);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(2L);
     Assert.assertTrue(statsCollector.isSorted());
     statsCollector.collect(3L);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4d);
+    statsCollector.collect(4L);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4);
+    statsCollector.collect(4L);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(2L);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(40d);
+    statsCollector.collect(40L);
     Assert.assertFalse(statsCollector.isSorted());
-    statsCollector.collect(20d);
+    statsCollector.collect(20L);
     Assert.assertFalse(statsCollector.isSorted());
     statsCollector.seal();
     Assert.assertEquals(statsCollector.getCardinality(), 6);
@@ -279,17 +285,17 @@ public class DictionariesTest {
   @Test
   public void testDoubleColumnPreIndexStatsCollector() {
     AbstractColumnStatisticsCollector statsCollector = buildStatsCollector("column1", DataType.DOUBLE);
-    statsCollector.collect(1);
+    statsCollector.collect(1d);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(2d);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(3L);
+    statsCollector.collect(3d);
     Assert.assertTrue(statsCollector.isSorted());
     statsCollector.collect(4d);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(4);
+    statsCollector.collect(4d);
     Assert.assertTrue(statsCollector.isSorted());
-    statsCollector.collect(2f);
+    statsCollector.collect(2d);
     Assert.assertFalse(statsCollector.isSorted());
     statsCollector.collect(40d);
     Assert.assertFalse(statsCollector.isSorted());
@@ -441,7 +447,7 @@ public class DictionariesTest {
   private AbstractColumnStatisticsCollector buildStatsCollector(String column, DataType dataType) {
     Schema schema = new Schema();
     schema.addField(new DimensionFieldSpec(column, dataType, true));
-    StatsCollectorConfig statsCollectorConfig = new StatsCollectorConfig(schema, null);
+    StatsCollectorConfig statsCollectorConfig = new StatsCollectorConfig(_tableConfig, schema, null);
 
     switch (dataType) {
       case INT:

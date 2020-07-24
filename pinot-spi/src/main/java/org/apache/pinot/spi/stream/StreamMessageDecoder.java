@@ -19,9 +19,9 @@
 package org.apache.pinot.spi.stream;
 
 import java.util.Map;
+import java.util.Set;
 import org.apache.pinot.spi.annotations.InterfaceAudience;
 import org.apache.pinot.spi.annotations.InterfaceStability;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
 
 
@@ -33,18 +33,24 @@ import org.apache.pinot.spi.data.readers.GenericRow;
 @InterfaceStability.Stable
 public interface StreamMessageDecoder<T> {
 
+  String RECORD_EXTRACTOR_CONFIG_KEY = "recordExtractorClass";
+
   /**
-   * Initialize the decoder with decoder properties map, the stream topic name and stream schema
-   * @param props
-   * @throws Exception
+   * Initializes the decoder.
+   *
+   * @param props Decoder properties extracted from the {@link StreamConfig}
+   * @param fieldsToRead The fields to read from the source stream. If blank, reads all fields (only for AVRO/JSON currently)
+   * @param topicName Topic name of the stream
+   * @throws Exception If an error occurs
    */
-  void init(Map<String, String> props, Schema indexingSchema, String topicName)
+  void init(Map<String, String> props, Set<String> fieldsToRead, String topicName)
       throws Exception;
 
   /**
-   * Decodes the payload received into a generic row
-   * @param payload
-   * @return
+   * Decodes a row.
+   *
+   * @param payload The buffer from which to read the row.
+   * @return A new row decoded from the buffer
    */
   GenericRow decode(T payload, GenericRow destination);
 

@@ -223,12 +223,16 @@ export default Component.extend({
 
       // Build new dimension array for display as table rows
       if (dimensionRows.length) {
+        let totalCost = 0;
+        dimensionRows.map(record => totalCost += record.cost);
         dimensionRows.forEach((record, index) => {
           let {
             dimensionArr, // Generate array of cell-specific objects for each dimension
             dimensionUrn // Generate URN for each record from dimension names/values
           } = this._generateDimensionMeta(dimensionNames, record);
-
+          let nodeSize = (record.sizeFactor || 0) * 100;
+          let cost = (totalCost !== 0) ? (record.cost || 0) / totalCost : (record.cost || 0);
+          cost = cost * 100;
           // New records of template-ready data
           newDimensionRows.push({
             id: index + 1,
@@ -238,14 +242,19 @@ export default Component.extend({
             dimensions: dimensionNames,
             isSelected: selectedUrns.has(dimensionUrn),
             percentageChange: record.percentageChange,
-            contributionChange: record.contributionChange,
-            contributionToOverallChange: record.contributionToOverallChange,
-            cob: `${toFixedIfDecimal(record.currentValue) || 0} / ${toFixedIfDecimal(record.baselineValue) || 0}`,
+            percentageChangeNum: parseFloat(record.percentageChange),
+            nodeSize: `${nodeSize.toFixed(4)}%`,
+            nodeSizeNum: parseFloat(nodeSize),
+            cost: `${cost.toFixed(4)}%`,
+            costNum: parseFloat(cost),
+            baseline: `${toFixedIfDecimal(record.baselineValue) || 0}`,
+            baselineNum: parseFloat(record.baselineValue),
+            current: `${toFixedIfDecimal(record.currentValue) || 0}`,
+            currentNum: parseFloat(record.currentValue),
             elementWidth: this._calculateContributionBarWidth(dimensionRows, record)
           });
         });
       }
-
       return newDimensionRows;
     }
   ),
@@ -274,9 +283,9 @@ export default Component.extend({
             disableSorting: true,
             isFirstColumn: index === 0,
             disableFiltering: isLastDimension, // currently overridden by headerFilteringRowTemplate
-            propertyName: dimension,
+            propertyName: 'dimensionValue',
+            dimensionCategory: dimension,
             title: dimension.capitalize(),
-            isGrouped: !isLastDimension, // no label grouping logic on last dimension
             component: 'custom/dimensions-table/dimension',
             className: `${tableBaseClass} ${tableBaseClass}--med-width ${tableBaseClass}--custom`
           });
@@ -350,8 +359,6 @@ export default Component.extend({
       currentValue: dimSubGroup.map(row => row.currentValue).reduce((total, amount) => total + amount),
       baselineValue: dimSubGroup.map(row => row.baselineValue).reduce((total, amount) => total + amount),
       percentageChange: recordToCopy.percentageChange,
-      contributionChange: recordToCopy.contributionChange,
-      contributionToOverallChange: recordToCopy.contributionToOverallChange,
       cost: recordToCopy.cost
     };
     dimensionRows.splice(whereToInsert, 0, newRecordObj);
@@ -484,30 +491,34 @@ export default Component.extend({
    * @private
    */
   _calculateContributionBarWidth(dimensionRows, record) {
-    const overallChangeValues = dimensionRows.map(row => toWidthNumber(row.contributionToOverallChange));
-    const allValuesPositive = overallChangeValues.every(val => val > 0);
+    const overallChangeValues = dimensionRows.map(row => row.cost ? row.cost : 0);
+    const allValuesPositive = overallChangeValues.every(val => val >= 0);
     const allValuesNegative = overallChangeValues.every(val => val < 0);
     const widthAdditivePositive = allValuesPositive ? EXTRA_WIDTH : 0;
     const widthAdditiveNegative = allValuesNegative ? EXTRA_WIDTH : 0;
 
     // Find the largest change value across all rows
     const maxChange = d3.max(dimensionRows.map((row) => {
-      return Math.abs(toWidthNumber(row.contributionToOverallChange));
+      return Math.abs(row.cost ? row.cost : 0);
     }));
 
     // Generate a scale mapping the change value span to a specific range
-    const widthScale = d3.scale.linear()
+    const widthScale = d3.scaleLinear()
       .domain([0, maxChange])
       .range([0, 100]);
 
+    // Get sign of percentageChange
+    const percentageValue = record.percentageChange ? toWidthNumber(record.percentageChange) : 0;
+
     // Convert contribution value to a width based on our scale
-    const contributionValue = toWidthNumber(record.contributionToOverallChange);
+    const contributionValue = record.cost ? record.cost : 0;
+    const signCarrier = percentageValue * contributionValue;
     const widthPercent = Math.round(widthScale(Math.abs(contributionValue)));
 
     // These will be used to set our bar widths/classes in dimensions-table/change-bars component
     return {
-      positive: (contributionValue > 0) ? `${widthPercent + widthAdditivePositive}%` : '0%',
-      negative: (contributionValue > 0) ? '0%' : `${widthPercent + widthAdditiveNegative}%`
+      positive: (signCarrier >= 0) ? `${widthPercent + widthAdditivePositive}%` : '0%',
+      negative: (signCarrier >= 0) ? '0%' : `${widthPercent + widthAdditiveNegative}%`
     };
   },
 

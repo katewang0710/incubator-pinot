@@ -1,5 +1,7 @@
 import moment from 'moment';
 import _ from 'lodash';
+import config from 'thirdeye-frontend/config/environment';
+
 
 const ROOTCAUSE_ANALYSIS_DURATION_MAX = 1209600000; // 14 days (in millis)
 const ROOTCAUSE_ANOMALY_DURATION_MAX = 604800000; // 7 days (in millis)
@@ -49,7 +51,7 @@ export const dateFormatFull = 'ddd, MMM D YYYY, h:mm a z';
  */
 export function makeTime(t, args) {
   if (typeof t === 'undefined') { t = moment().valueOf(); }
-  return moment(t, args).tz('America/Los_Angeles');
+  return moment(t, args).tz(config.timeZone);
 }
 
 /**
@@ -79,7 +81,7 @@ export function isIterable(obj) {
  * @see isIterable(obj)
  */
 export function makeIterable(obj) {
-  if (obj === null) {
+  if (obj === null || obj === undefined) {
     return [];
   }
   return isIterable(obj) ? [...obj] : [obj];

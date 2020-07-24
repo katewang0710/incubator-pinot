@@ -38,6 +38,7 @@ import java.io.File;
 import java.io.IOException;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -54,7 +55,7 @@ import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.apache.pinot.common.data.TimeGranularitySpec.TimeFormat;
+import org.apache.pinot.spi.data.DateTimeFieldSpec;
 import org.apache.pinot.thirdeye.common.dimension.DimensionMap;
 import org.apache.pinot.thirdeye.common.time.TimeGranularity;
 import org.apache.pinot.thirdeye.common.time.TimeSpec;
@@ -62,6 +63,8 @@ import org.apache.pinot.thirdeye.dashboard.ThirdEyeDashboardConfiguration;
 import org.apache.pinot.thirdeye.datalayer.bao.DatasetConfigManager;
 import org.apache.pinot.thirdeye.datalayer.bao.MetricConfigManager;
 import org.apache.pinot.thirdeye.datalayer.dto.DatasetConfigDTO;
+import org.apache.pinot.thirdeye.datalayer.dto.DetectionConfigDTO;
+import org.apache.pinot.thirdeye.datalayer.dto.MergedAnomalyResultDTO;
 import org.apache.pinot.thirdeye.datalayer.dto.MetricConfigDTO;
 import org.apache.pinot.thirdeye.datalayer.pojo.AlertConfigBean.COMPARE_MODE;
 import org.apache.pinot.thirdeye.datalayer.pojo.MetricConfigBean;
@@ -74,12 +77,13 @@ import org.apache.pinot.thirdeye.datasource.ThirdEyeCacheRegistry;
 import org.apache.pinot.thirdeye.datasource.cache.MetricDataset;
 import org.apache.pinot.thirdeye.datasource.pinot.resultset.ThirdEyeResultSet;
 import org.apache.pinot.thirdeye.datasource.pinot.resultset.ThirdEyeResultSetGroup;
+import org.apache.pinot.thirdeye.formatter.DetectionConfigFormatter;
 import org.apache.pinot.thirdeye.rootcause.impl.MetricEntity;
 import org.joda.time.Period;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.pinot.thirdeye.detection.wrapper.GrouperWrapper.*;
+import static org.apache.pinot.thirdeye.detection.wrapper.GrouperWrapper.PROP_DETECTOR_COMPONENT_NAME;
 
 
 public abstract class ThirdEyeUtils {
@@ -92,6 +96,7 @@ public abstract class ThirdEyeUtils {
   private static final String TWO_DECIMALS_FORMAT = "#,###.##";
   private static final String MAX_DECIMALS_FORMAT = "#,###.#####";
   private static final String DECIMALS_FORMAT_TOKEN = "#";
+  private static final String PROP_DETECTOR_COMPONENT_NAME_DELIMETER = ",";
 
   private static final int DEFAULT_HEAP_PERCENTAGE_FOR_RESULTSETGROUP_CACHE = 50;
   private static final int DEFAULT_LOWER_BOUND_OF_RESULTSETGROUP_CACHE_SIZE_IN_MB = 100;
@@ -233,7 +238,7 @@ public abstract class ThirdEyeUtils {
 
   private static String getTimeFormatString(DatasetConfigDTO datasetConfig) {
     String timeFormat = datasetConfig.getTimeFormat();
-    if (timeFormat.startsWith(TimeFormat.SIMPLE_DATE_FORMAT.toString())) {
+    if (timeFormat.startsWith(DateTimeFieldSpec.TimeFormat.SIMPLE_DATE_FORMAT.toString())) {
       timeFormat = getSDFPatternFromTimeFormat(timeFormat);
     }
     return timeFormat;
@@ -391,6 +396,26 @@ public abstract class ThirdEyeUtils {
       return functions.stream().map(
           f -> datasetConfigManager.findByDataset(f.getDataset())).collect(Collectors.toList());
     }
+  }
+
+  /**
+   * Get the expected delay for the detection pipeline.
+   * This delay should be the longest of the expected delay of the underline datasets.
+   *
+   * @param config The detection config.
+   * @return The expected delay for this alert in milliseconds.
+   */
+  public static long getDetectionExpectedDelay(DetectionConfigDTO config) {
+    long maxExpectedDelay = 0;
+    Set<String> metricUrns = DetectionConfigFormatter
+        .extractMetricUrnsFromProperties(config.getProperties());
+    for (String urn : metricUrns) {
+      List<DatasetConfigDTO> datasets = ThirdEyeUtils.getDatasetConfigsFromMetricUrn(urn);
+      for (DatasetConfigDTO dataset : datasets) {
+        maxExpectedDelay = Math.max(dataset.getExpectedDelay().toMillis(), maxExpectedDelay);
+      }
+    }
+    return maxExpectedDelay;
   }
 
   public static MetricConfigDTO getMetricConfigFromId(Long metricId) {
@@ -684,6 +709,16 @@ public abstract class ThirdEyeUtils {
   }
 
   /**
+   * Check if the anomaly is detected by multiple components
+   * @param anomaly the anomaly
+   * @return if the anomaly is detected by multiple components
+   */
+  public static boolean isDetectedByMultipleComponents(MergedAnomalyResultDTO anomaly) {
+    String componentName = anomaly.getProperties().getOrDefault(PROP_DETECTOR_COMPONENT_NAME, "");
+    return componentName.contains(PROP_DETECTOR_COMPONENT_NAME_DELIMETER);
+  }
+
+  /**
    * Combine two components with comma separated.
    * For example, will combine "component1" and "component2" into "component1, component2".
    *
@@ -693,13 +728,9 @@ public abstract class ThirdEyeUtils {
    */
   private static String combineComponents(String component1, String component2) {
     List<String> components = new ArrayList<>();
-    for (String component : component1.split(",")) {
-      components.add(component);
-    }
-    for (String component : component2.split(",")) {
-      components.add(component);
-    }
-    return String.join(",", components.stream().distinct().collect(Collectors.toList()));
+    components.addAll(Arrays.asList(component1.split(PROP_DETECTOR_COMPONENT_NAME_DELIMETER)));
+    components.addAll(Arrays.asList(component2.split(PROP_DETECTOR_COMPONENT_NAME_DELIMETER)));
+    return components.stream().distinct().collect(Collectors.joining(PROP_DETECTOR_COMPONENT_NAME_DELIMETER));
   }
 
   /**

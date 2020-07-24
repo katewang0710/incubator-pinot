@@ -20,15 +20,17 @@ package org.apache.pinot.core.segment.index.loader.defaultcolumn;
 
 import com.google.common.base.Preconditions;
 import java.io.File;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.spi.data.Schema;
+import java.util.Set;
 import org.apache.pinot.core.segment.creator.impl.V1Constants;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
+import org.apache.pinot.core.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.core.segment.index.loader.LoaderUtils;
 import org.apache.pinot.core.segment.index.loader.V3RemoveIndexException;
 import org.apache.pinot.core.segment.index.loader.V3UpdateIndexException;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.core.segment.store.ColumnIndexType;
 import org.apache.pinot.core.segment.store.SegmentDirectory;
+import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,16 +38,13 @@ import org.slf4j.LoggerFactory;
 public class V3DefaultColumnHandler extends BaseDefaultColumnHandler {
   private static final Logger LOGGER = LoggerFactory.getLogger(V3DefaultColumnHandler.class);
 
-  private final SegmentDirectory.Writer _segmentWriter;
-
   public V3DefaultColumnHandler(File indexDir, Schema schema, SegmentMetadataImpl segmentMetadata,
       SegmentDirectory.Writer segmentWriter) {
-    super(indexDir, schema, segmentMetadata);
-    _segmentWriter = segmentWriter;
+    super(indexDir, schema, segmentMetadata, segmentWriter);
   }
 
   @Override
-  protected void updateDefaultColumn(String column, DefaultColumnAction action)
+  protected void updateDefaultColumn(String column, DefaultColumnAction action, IndexLoadingConfig indexLoadingConfig)
       throws Exception {
     LOGGER.info("Starting default column action: {} on column: {}", action, column);
 
@@ -61,13 +60,12 @@ public class V3DefaultColumnHandler extends BaseDefaultColumnHandler {
           "Default value indices for column: " + column + " cannot be removed for V3 format segment.");
     }
 
-    // Create new dictionary and forward index, and update column metadata
-    createColumnV1Indices(column);
-
-    // Write index to V3 format.
     FieldSpec fieldSpec = _schema.getFieldSpecFor(column);
     Preconditions.checkNotNull(fieldSpec);
     boolean isSingleValue = fieldSpec.isSingleValueField();
+    // Create new dictionary and forward index, and update column metadata
+    createColumnV1Indices(column);
+    // Write index to V3 format.
     File dictionaryFile = new File(_indexDir, column + V1Constants.Dict.FILE_EXTENSION);
     File forwardIndexFile;
     if (isSingleValue) {

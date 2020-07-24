@@ -20,58 +20,43 @@ package org.apache.pinot.core.plan;
 
 import java.util.HashMap;
 import java.util.Map;
-import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.core.common.Operator;
 import org.apache.pinot.core.indexsegment.IndexSegment;
 import org.apache.pinot.core.operator.query.DictionaryBasedAggregationOperator;
-import org.apache.pinot.core.query.aggregation.AggregationFunctionContext;
+import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 
 /**
  * Dictionary based aggregation plan node.
  */
+@SuppressWarnings("rawtypes")
 public class DictionaryBasedAggregationPlanNode implements PlanNode {
-  private static final Logger LOGGER = LoggerFactory.getLogger(DictionaryBasedAggregationPlanNode.class);
-
+  private final IndexSegment _indexSegment;
+  private final AggregationFunction[] _aggregationFunctions;
   private final Map<String, Dictionary> _dictionaryMap;
-  private final AggregationFunctionContext[] _aggregationFunctionContexts;
-  private IndexSegment _indexSegment;
 
   /**
    * Constructor for the class.
    *
    * @param indexSegment Segment to process
-   * @param brokerRequest Broker request
+   * @param queryContext Query context
    */
-  public DictionaryBasedAggregationPlanNode(IndexSegment indexSegment, BrokerRequest brokerRequest) {
+  public DictionaryBasedAggregationPlanNode(IndexSegment indexSegment, QueryContext queryContext) {
     _indexSegment = indexSegment;
+    _aggregationFunctions = AggregationFunctionUtils.getAggregationFunctions(queryContext);
     _dictionaryMap = new HashMap<>();
-
-    _aggregationFunctionContexts =
-        AggregationFunctionUtils.getAggregationFunctionContexts(brokerRequest, indexSegment.getSegmentMetadata());
-
-    for (AggregationFunctionContext aggregationFunctionContext : _aggregationFunctionContexts) {
-      String column = aggregationFunctionContext.getColumn();
-      if (!_dictionaryMap.containsKey(column)) {
-        _dictionaryMap.put(column, _indexSegment.getDataSource(column).getDictionary());
-      }
+    for (AggregationFunction aggregationFunction : _aggregationFunctions) {
+      String column = ((ExpressionContext) aggregationFunction.getInputExpressions().get(0)).getIdentifier();
+      _dictionaryMap.computeIfAbsent(column, k -> _indexSegment.getDataSource(k).getDictionary());
     }
   }
 
   @Override
-  public Operator run() {
-    return new DictionaryBasedAggregationOperator(_aggregationFunctionContexts,
-        _indexSegment.getSegmentMetadata().getTotalRawDocs(), _dictionaryMap);
-  }
-
-  @Override
-  public void showTree(String prefix) {
-    LOGGER.debug("{} Segment Level Inner-Segment Plan Node:", prefix);
-    LOGGER.debug("{} Operator: DictionaryBasedAggregationOperator", prefix);
-    LOGGER.debug("{} IndexSegment: {}", prefix, _indexSegment.getSegmentName());
+  public DictionaryBasedAggregationOperator run() {
+    return new DictionaryBasedAggregationOperator(_aggregationFunctions, _dictionaryMap,
+        _indexSegment.getSegmentMetadata().getTotalDocs());
   }
 }

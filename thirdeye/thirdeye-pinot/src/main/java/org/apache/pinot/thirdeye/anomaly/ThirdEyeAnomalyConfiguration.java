@@ -25,6 +25,7 @@ import org.apache.pinot.thirdeye.anomaly.task.TaskDriverConfiguration;
 import org.apache.pinot.thirdeye.auto.onboard.AutoOnboardConfiguration;
 import org.apache.pinot.thirdeye.common.ThirdEyeConfiguration;
 import java.util.List;
+import org.apache.pinot.thirdeye.common.restclient.ThirdEyeRestClientConfiguration;
 
 
 public class ThirdEyeAnomalyConfiguration extends ThirdEyeConfiguration {
@@ -34,6 +35,7 @@ public class ThirdEyeAnomalyConfiguration extends ThirdEyeConfiguration {
   private boolean classifier = false;
   private boolean dataCompleteness = false;
   private boolean holidayEventsLoader = false;
+  private boolean mockEventsLoader = false;
   private boolean monitor = false;
   private boolean pinotProxy = false;
   private boolean scheduler = false;
@@ -46,14 +48,24 @@ public class ThirdEyeAnomalyConfiguration extends ThirdEyeConfiguration {
   private long id;
   private String dashboardHost;
   private HolidayEventsLoaderConfiguration holidayEventsLoaderConfiguration = new HolidayEventsLoaderConfiguration();
+  private MockEventsLoaderConfiguration mockEventsLoaderConfiguration = new MockEventsLoaderConfiguration();
   private MonitorConfiguration monitorConfiguration = new MonitorConfiguration();
   private AutoOnboardConfiguration autoOnboardConfiguration = new AutoOnboardConfiguration();
   private TaskDriverConfiguration taskDriverConfiguration = new TaskDriverConfiguration();
+  private ThirdEyeRestClientConfiguration teRestConfig = new ThirdEyeRestClientConfiguration();
   private DataAvailabilitySchedulingConfiguration
       dataAvailabilitySchedulingConfiguration = new DataAvailabilitySchedulingConfiguration();
   private String failureFromAddress;
   private String failureToAddress;
   private List<String> holidayCountriesWhitelist;
+
+  public ThirdEyeRestClientConfiguration getThirdEyeRestClientConfiguration() {
+    return teRestConfig;
+  }
+
+  public void setThirdEyeRestClientConfiguration(ThirdEyeRestClientConfiguration teRestConfig) {
+    this.teRestConfig = teRestConfig;
+  }
 
   public HolidayEventsLoaderConfiguration getHolidayEventsLoaderConfiguration() {
     return holidayEventsLoaderConfiguration;
@@ -61,6 +73,22 @@ public class ThirdEyeAnomalyConfiguration extends ThirdEyeConfiguration {
 
   public void setHolidayEventsLoaderConfiguration(HolidayEventsLoaderConfiguration holidayEventsLoaderConfiguration) {
     this.holidayEventsLoaderConfiguration = holidayEventsLoaderConfiguration;
+  }
+
+  public boolean isMockEventsLoader() {
+    return mockEventsLoader;
+  }
+
+  public void setMockEventsLoader(boolean mockEventsLoader) {
+    this.mockEventsLoader = mockEventsLoader;
+  }
+
+  public MockEventsLoaderConfiguration getMockEventsLoaderConfiguration() {
+    return mockEventsLoaderConfiguration;
+  }
+
+  public void setMockEventsLoaderConfiguration(MockEventsLoaderConfiguration mockEventsLoaderConfiguration) {
+    this.mockEventsLoaderConfiguration = mockEventsLoaderConfiguration;
   }
 
   public boolean isDetectionAlert() {

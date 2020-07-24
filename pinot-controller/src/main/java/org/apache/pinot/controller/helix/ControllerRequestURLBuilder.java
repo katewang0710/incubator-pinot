@@ -20,10 +20,10 @@ package org.apache.pinot.controller.helix;
 
 import javax.annotation.Nullable;
 import org.apache.commons.lang.StringUtils;
-import org.apache.pinot.common.assignment.InstancePartitionsType;
 import org.apache.pinot.common.utils.StringUtil;
 import org.apache.pinot.common.utils.URIUtils;
 import org.apache.pinot.controller.helix.core.rebalance.RebalanceConfigConstants;
+import org.apache.pinot.spi.config.table.assignment.InstancePartitionsType;
 
 
 public class ControllerRequestURLBuilder {
@@ -45,15 +45,11 @@ public class ControllerRequestURLBuilder {
     return StringUtil.join("/", _baseUrl, "instances");
   }
 
-  public String forInstanceDelete(String instanceName) {
-    return StringUtil.join("/", _baseUrl, "instances", instanceName);
-  }
-
   public String forInstanceState(String instanceName) {
     return StringUtil.join("/", _baseUrl, "instances", instanceName, "state");
   }
 
-  public String forInstanceInformation(String instanceName) {
+  public String forInstance(String instanceName) {
     return StringUtil.join("/", _baseUrl, "instances", instanceName);
   }
 
@@ -92,6 +88,48 @@ public class ControllerRequestURLBuilder {
 
   public String forServerTenantDelete(String tenantName) {
     return StringUtil.join("/", _baseUrl, "tenants", tenantName, "?type=server");
+  }
+
+  public String forBrokersGet(String state) {
+    if (state == null) {
+      return StringUtil.join("/", _baseUrl, "brokers");
+    }
+    return StringUtil.join("/", _baseUrl, "brokers", "?state=" + state);
+  }
+
+  public String forBrokerTenantsGet(String state) {
+    if (state == null) {
+      return StringUtil.join("/", _baseUrl, "brokers", "tenants");
+    }
+    return StringUtil.join("/", _baseUrl, "brokers", "tenants", "?state=" + state);
+  }
+
+  public String forBrokerTenantGet(String tenant, String state) {
+    if (state == null) {
+      return StringUtil.join("/", _baseUrl, "brokers", "tenants", tenant);
+    }
+    return StringUtil.join("/", _baseUrl, "brokers", "tenants", tenant, "?state=" + state);
+  }
+
+  public String forBrokerTablesGet(String state) {
+    if (state == null) {
+      return StringUtil.join("/", _baseUrl, "brokers", "tables");
+    }
+    return StringUtil.join("/", _baseUrl, "brokers", "tables", "?state=" + state);
+  }
+
+  public String forBrokerTableGet(String table, String tableType, String state) {
+    StringBuilder params = new StringBuilder();
+    if (tableType != null) {
+      params.append("?type=" + tableType);
+    }
+    if (state != null) {
+      if (params.length() > 0) {
+        params.append("&");
+      }
+      params.append("?state=" + state);
+    }
+    return StringUtil.join("/", _baseUrl, "brokers", "tables", table, params.toString());
   }
 
   public String forTableCreate() {

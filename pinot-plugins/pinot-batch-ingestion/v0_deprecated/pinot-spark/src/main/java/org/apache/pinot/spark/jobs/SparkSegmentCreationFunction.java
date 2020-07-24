@@ -31,28 +31,31 @@ import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.pinot.common.config.SegmentsValidationAndRetentionConfig;
-import org.apache.pinot.common.config.TableConfig;
-import org.apache.pinot.spi.utils.DataSize;
 import org.apache.pinot.common.utils.TarGzCompressionUtils;
-import org.apache.pinot.spi.data.readers.FileFormat;
-import org.apache.pinot.thrift.data.readers.ThriftRecordReaderConfig;
 import org.apache.pinot.core.indexsegment.generator.SegmentGeneratorConfig;
 import org.apache.pinot.core.segment.creator.SegmentIndexCreationDriver;
 import org.apache.pinot.core.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.core.segment.name.NormalizedDateSegmentNameGenerator;
 import org.apache.pinot.core.segment.name.SegmentNameGenerator;
 import org.apache.pinot.core.segment.name.SimpleSegmentNameGenerator;
-import org.apache.pinot.csv.data.readers.CSVRecordReaderConfig;
 import org.apache.pinot.ingestion.common.JobConfigConstants;
+import org.apache.pinot.plugin.inputformat.csv.CSVRecordReaderConfig;
+import org.apache.pinot.plugin.inputformat.protobuf.ProtoBufRecordReaderConfig;
+import org.apache.pinot.plugin.inputformat.thrift.ThriftRecordReaderConfig;
+import org.apache.pinot.spi.config.table.SegmentsValidationAndRetentionConfig;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.data.DateTimeFieldSpec;
+import org.apache.pinot.spi.data.DateTimeFormatSpec;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.spi.data.TimeFieldSpec;
+import org.apache.pinot.spi.data.readers.FileFormat;
 import org.apache.pinot.spi.data.readers.RecordReaderConfig;
+import org.apache.pinot.spi.utils.DataSizeUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.apache.pinot.spark.jobs.SparkSegmentCreationJob.getRelativeOutputPath;
+
 
 public class SparkSegmentCreationFunction implements Serializable {
   protected static final String LOCAL_TEMP_DIR = "pinot_spark_tmp";
@@ -93,9 +96,10 @@ public class SparkSegmentCreationFunction implements Serializable {
     _schema = Schema.fromString(_jobConf.get(JobConfigConstants.SCHEMA));
 
     // Optional
+    // Once we move to dateTimeFieldSpec, check that table config (w/ valid timeColumnName) is provided if multiple dateTimeFieldSpecs are configured
     String tableConfigString = _jobConf.get(JobConfigConstants.TABLE_CONFIG);
     if (tableConfigString != null) {
-      _tableConfig = TableConfig.fromJsonString(tableConfigString);
+      _tableConfig = JsonUtils.stringToObject(tableConfigString, TableConfig.class);
     }
     String readerConfigFile = _jobConf.get(JobConfigConstants.PATH_TO_READER_CONFIG);
     if (readerConfigFile != null) {
@@ -115,16 +119,18 @@ public class SparkSegmentCreationFunction implements Serializable {
         Preconditions.checkState(_tableConfig != null,
             "In order to use NormalizedDateSegmentNameGenerator, table config must be provided");
         SegmentsValidationAndRetentionConfig validationConfig = _tableConfig.getValidationConfig();
-        String timeFormat = null;
-        TimeFieldSpec timeFieldSpec = _schema.getTimeFieldSpec();
-        if (timeFieldSpec != null) {
-          timeFormat = timeFieldSpec.getOutgoingGranularitySpec().getTimeFormat();
+        DateTimeFormatSpec dateTimeFormatSpec = null;
+        String timeColumnName = _tableConfig.getValidationConfig().getTimeColumnName();
+        if (timeColumnName != null) {
+          DateTimeFieldSpec dateTimeFieldSpec = _schema.getSpecForTimeColumn(timeColumnName);
+          if (dateTimeFieldSpec != null) {
+            dateTimeFormatSpec = new DateTimeFormatSpec(dateTimeFieldSpec.getFormat());
+          }
         }
         _segmentNameGenerator =
             new NormalizedDateSegmentNameGenerator(_rawTableName, _jobConf.get(JobConfigConstants.SEGMENT_NAME_PREFIX),
                 _jobConf.getBoolean(JobConfigConstants.EXCLUDE_SEQUENCE_ID, false),
-                validationConfig.getSegmentPushType(), validationConfig.getSegmentPushFrequency(),
-                validationConfig.getTimeType(), timeFormat);
+                validationConfig.getSegmentPushType(), validationConfig.getSegmentPushFrequency(), dateTimeFormatSpec);
         break;
       default:
         throw new UnsupportedOperationException("Unsupported segment name generator type: " + segmentNameGeneratorType);
@@ -232,12 +238,12 @@ public class SparkSegmentCreationFunction implements Serializable {
     String segmentTarFileName = segmentName + JobConfigConstants.TAR_GZ_FILE_EXT;
     File localSegmentTarFile = new File(_localSegmentTarDir, segmentTarFileName);
     _logger.info("Tarring segment from: {} to: {}", localSegmentDir, localSegmentTarFile);
-    TarGzCompressionUtils.createTarGzOfDirectory(localSegmentDir.getPath(), localSegmentTarFile.getPath());
+    TarGzCompressionUtils.createTarGzFile(localSegmentDir, localSegmentTarFile);
 
     long uncompressedSegmentSize = FileUtils.sizeOf(localSegmentDir);
     long compressedSegmentSize = FileUtils.sizeOf(localSegmentTarFile);
     _logger.info("Size for segment: {}, uncompressed: {}, compressed: {}", segmentName,
-        DataSize.fromBytes(uncompressedSegmentSize), DataSize.fromBytes(compressedSegmentSize));
+        DataSizeUtils.fromBytes(uncompressedSegmentSize), DataSizeUtils.fromBytes(compressedSegmentSize));
 
     Path hdfsSegmentTarFile = new Path(_hdfsSegmentTarDir, segmentTarFileName);
     if (_useRelativePath) {
@@ -286,6 +292,15 @@ public class SparkSegmentCreationFunction implements Serializable {
           ThriftRecordReaderConfig readerConfig =
               JsonUtils.inputStreamToObject(inputStream, ThriftRecordReaderConfig.class);
           _logger.info("Using Thrift record reader config: {}", readerConfig);
+          return readerConfig;
+        }
+      }
+
+      if (fileFormat == FileFormat.PROTO) {
+        try (InputStream inputStream = FileSystem.get(_readerConfigFile.toUri(), _jobConf).open(_readerConfigFile)) {
+          ProtoBufRecordReaderConfig readerConfig =
+              JsonUtils.inputStreamToObject(inputStream, ProtoBufRecordReaderConfig.class);
+          _logger.info("Using Protocol Buffer record reader config: {}", readerConfig);
           return readerConfig;
         }
       }

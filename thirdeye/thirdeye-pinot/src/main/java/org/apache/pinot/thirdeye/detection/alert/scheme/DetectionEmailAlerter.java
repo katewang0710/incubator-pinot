@@ -31,9 +31,11 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.mail.DefaultAuthenticator;
 import org.apache.commons.mail.EmailException;
 import org.apache.commons.mail.HtmlEmail;
+import org.apache.pinot.thirdeye.anomaly.utils.ThirdeyeMetricsUtil;
 import org.apache.pinot.thirdeye.datalayer.dto.DetectionAlertConfigDTO;
 import org.apache.pinot.thirdeye.notification.commons.SmtpConfiguration;
 import org.apache.pinot.thirdeye.anomaly.ThirdEyeAnomalyConfiguration;
@@ -61,13 +63,14 @@ import static org.apache.pinot.thirdeye.notification.commons.SmtpConfiguration.S
 public class DetectionEmailAlerter extends DetectionAlertScheme {
   private static final Logger LOG = LoggerFactory.getLogger(DetectionEmailAlerter.class);
 
-  private static final String PROP_RECIPIENTS = "recipients";
+  public static final String PROP_RECIPIENTS = "recipients";
   private static final String PROP_TO = "to";
   private static final String PROP_CC = "cc";
   private static final String PROP_BCC = "bcc";
 
   private static final String PROP_EMAIL_WHITELIST = "emailWhitelist";
   private static final String PROP_ADMIN_RECIPIENTS = "adminRecipients";
+  private static final String PROP_FROM_ADDRESS = "fromAddress";
 
   public static final String PROP_EMAIL_SCHEME = "emailScheme";
 
@@ -79,7 +82,7 @@ public class DetectionEmailAlerter extends DetectionAlertScheme {
   private SmtpConfiguration smtpConfig;
 
   public DetectionEmailAlerter(DetectionAlertConfigDTO subsConfig, ThirdEyeAnomalyConfiguration thirdeyeConfig,
-      DetectionAlertFilterResult result) throws Exception {
+      DetectionAlertFilterResult result) {
     super(subsConfig, result);
     this.teConfig = thirdeyeConfig;
     this.smtpConfig = SmtpConfiguration.createFromProperties(this.teConfig.getAlerterConfiguration().get(SMTP_CONFIG_KEY));
@@ -103,7 +106,8 @@ public class DetectionEmailAlerter extends DetectionAlertScheme {
     if (recipients.getCc() == null) {
       recipients.setCc(new HashSet<>());
     }
-    recipients.getCc().addAll(ConfigUtils.getList(this.teConfig.getAlerterConfiguration().get(PROP_ADMIN_RECIPIENTS)));
+    recipients.getCc().addAll(ConfigUtils.getList(this.teConfig.getAlerterConfiguration()
+        .get(SMTP_CONFIG_KEY).get(PROP_ADMIN_RECIPIENTS)));
   }
 
   private void whitelistRecipients(DetectionAlertFilterRecipients recipients) {
@@ -144,11 +148,15 @@ public class DetectionEmailAlerter extends DetectionAlertScheme {
     blacklistRecipients(recipients);
     validateAlert(recipients, anomalies);
 
-    BaseNotificationContent content = buildNotificationContent(emailClientConfigs);
+    BaseNotificationContent content = getNotificationContent(emailClientConfigs);
     EmailEntity emailEntity = new EmailContentFormatter(emailClientConfigs, content, this.teConfig, subsConfig)
         .getEmailEntity(anomalies);
     if (Strings.isNullOrEmpty(this.subsConfig.getFrom())) {
-      throw new IllegalArgumentException("Invalid sender's email");
+      String fromAddress = MapUtils.getString(this.teConfig.getAlerterConfiguration().get(SMTP_CONFIG_KEY), PROP_FROM_ADDRESS);
+      if (Strings.isNullOrEmpty(fromAddress)) {
+        throw new IllegalArgumentException("Invalid sender's email");
+      }
+      this.subsConfig.setFrom(fromAddress);
     }
 
     HtmlEmail email = emailEntity.getContent();
@@ -212,8 +220,10 @@ public class DetectionEmailAlerter extends DetectionAlertScheme {
               new HashSet<>(ConfigUtils.getList(emailRecipients.get(PROP_CC))),
               new HashSet<>(ConfigUtils.getList(emailRecipients.get(PROP_BCC))));
           sendEmail(prepareEmailContent(subsConfig, emailClientConfigs, anomalyResultListOfGroup, recipients));
+          ThirdeyeMetricsUtil.emailAlertsSucesssCounter.inc();
         }
-      } catch (IllegalArgumentException e) {
+      } catch (Exception e) {
+        ThirdeyeMetricsUtil.emailAlertsFailedCounter.inc();
         super.handleAlertFailure(result.getValue().size(), e);
       }
     }

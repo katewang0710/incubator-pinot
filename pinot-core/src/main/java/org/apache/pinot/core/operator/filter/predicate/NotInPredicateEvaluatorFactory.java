@@ -26,16 +26,16 @@ import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
-import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.common.utils.HashUtil;
-import org.apache.pinot.spi.utils.ByteArray;
-import org.apache.pinot.core.common.Predicate;
-import org.apache.pinot.core.common.predicate.NotInPredicate;
+import org.apache.pinot.core.query.request.context.predicate.NotInPredicate;
+import org.apache.pinot.core.query.request.context.predicate.Predicate;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.ByteArray;
+import org.apache.pinot.spi.utils.BytesUtils;
 
 
 /**
@@ -65,7 +65,7 @@ public class NotInPredicateEvaluatorFactory {
    * @return Raw value based NOT_IN predicate evaluator
    */
   public static BaseRawValueBasedPredicateEvaluator newRawValueBasedEvaluator(NotInPredicate notInPredicate,
-      FieldSpec.DataType dataType) {
+      DataType dataType) {
     switch (dataType) {
       case INT:
         return new IntRawValueBasedNotInPredicateEvaluator(notInPredicate);
@@ -92,8 +92,8 @@ public class NotInPredicateEvaluatorFactory {
     int[] _nonMatchingDictIds;
 
     DictionaryBasedNotInPredicateEvaluator(NotInPredicate notInPredicate, Dictionary dictionary) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingDictIdSet = new IntOpenHashSet(HashUtil.getMinHashSetSize(values.length));
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingDictIdSet = new IntOpenHashSet(HashUtil.getMinHashSetSize(values.size()));
       for (String value : values) {
         int dictId = dictionary.indexOf(value);
         if (dictId >= 0) {
@@ -152,8 +152,8 @@ public class NotInPredicateEvaluatorFactory {
     final IntSet _nonMatchingValues;
 
     IntRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new IntOpenHashSet(HashUtil.getMinHashSetSize(values.length));
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingValues = new IntOpenHashSet(HashUtil.getMinHashSetSize(values.size()));
       for (String value : values) {
         _nonMatchingValues.add(Integer.parseInt(value));
       }
@@ -162,6 +162,11 @@ public class NotInPredicateEvaluatorFactory {
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.INT;
     }
 
     @Override
@@ -174,8 +179,8 @@ public class NotInPredicateEvaluatorFactory {
     final LongSet _nonMatchingValues;
 
     LongRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new LongOpenHashSet(values.length);
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingValues = new LongOpenHashSet(values.size());
       for (String value : values) {
         _nonMatchingValues.add(Long.parseLong(value));
       }
@@ -184,6 +189,11 @@ public class NotInPredicateEvaluatorFactory {
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.LONG;
     }
 
     @Override
@@ -196,8 +206,8 @@ public class NotInPredicateEvaluatorFactory {
     final FloatSet _nonMatchingValues;
 
     FloatRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new FloatOpenHashSet(HashUtil.getMinHashSetSize(values.length));
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingValues = new FloatOpenHashSet(HashUtil.getMinHashSetSize(values.size()));
       for (String value : values) {
         _nonMatchingValues.add(Float.parseFloat(value));
       }
@@ -206,6 +216,11 @@ public class NotInPredicateEvaluatorFactory {
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.FLOAT;
     }
 
     @Override
@@ -218,8 +233,8 @@ public class NotInPredicateEvaluatorFactory {
     final DoubleSet _nonMatchingValues;
 
     DoubleRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new DoubleOpenHashSet(HashUtil.getMinHashSetSize(values.length));
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingValues = new DoubleOpenHashSet(HashUtil.getMinHashSetSize(values.size()));
       for (String value : values) {
         _nonMatchingValues.add(Double.parseDouble(value));
       }
@@ -228,6 +243,11 @@ public class NotInPredicateEvaluatorFactory {
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.DOUBLE;
     }
 
     @Override
@@ -240,14 +260,17 @@ public class NotInPredicateEvaluatorFactory {
     final Set<String> _nonMatchingValues;
 
     StringRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new HashSet<>(HashUtil.getMinHashSetSize(values.length));
-      Collections.addAll(_nonMatchingValues, values);
+      _nonMatchingValues = new HashSet<>(notInPredicate.getValues());
     }
 
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.STRING;
     }
 
     @Override
@@ -260,8 +283,8 @@ public class NotInPredicateEvaluatorFactory {
     final Set<ByteArray> _nonMatchingValues;
 
     BytesRawValueBasedNotInPredicateEvaluator(NotInPredicate notInPredicate) {
-      String[] values = notInPredicate.getValues();
-      _nonMatchingValues = new HashSet<>(HashUtil.getMinHashSetSize(values.length));
+      List<String> values = notInPredicate.getValues();
+      _nonMatchingValues = new HashSet<>(HashUtil.getMinHashSetSize(values.size()));
       for (String value : values) {
         _nonMatchingValues.add(BytesUtils.toByteArray(value));
       }
@@ -270,6 +293,11 @@ public class NotInPredicateEvaluatorFactory {
     @Override
     public Predicate.Type getPredicateType() {
       return Predicate.Type.NOT_IN;
+    }
+
+    @Override
+    public DataType getDataType() {
+      return DataType.BYTES;
     }
 
     @Override

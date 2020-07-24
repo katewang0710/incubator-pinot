@@ -31,16 +31,18 @@ import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.helix.model.InstanceConfig;
-import org.apache.pinot.common.config.Instance;
-import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.common.utils.config.InstanceUtils;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.PinotResourceManagerResponse;
+import org.apache.pinot.spi.config.instance.Instance;
+import org.apache.pinot.spi.utils.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -97,7 +99,7 @@ public class PinotInstanceRestletResource {
     response.put("enabled", instanceConfig.getInstanceEnabled());
     response.put("port", instanceConfig.getPort());
     response.set("tags", JsonUtils.objectToJsonNode(instanceConfig.getTags()));
-    response.set("pools", JsonUtils.objectToJsonNode(instanceConfig.getRecord().getMapField(Instance.POOL_KEY)));
+    response.set("pools", JsonUtils.objectToJsonNode(instanceConfig.getRecord().getMapField(InstanceUtils.POOL_KEY)));
     return response.toString();
   }
 
@@ -108,7 +110,7 @@ public class PinotInstanceRestletResource {
   @ApiOperation(value = "Create a new instance", consumes = MediaType.APPLICATION_JSON, notes = "Creates a new instance with given instance config")
   @ApiResponses(value = {@ApiResponse(code = 200, message = "Success"), @ApiResponse(code = 409, message = "Instance already exists"), @ApiResponse(code = 500, message = "Internal error")})
   public SuccessResponse addInstance(Instance instance) {
-    LOGGER.info("Instance creation request received for instance: {}", instance.getInstanceId());
+    LOGGER.info("Instance creation request received for instance: {}", InstanceUtils.getHelixInstanceId(instance));
     if (!pinotHelixResourceManager.addInstance(instance).isSuccessful()) {
       throw new ControllerApplicationException(LOGGER, "Instance already exists", Response.Status.CONFLICT);
     }
@@ -175,5 +177,23 @@ public class PinotInstanceRestletResource {
           "Failed to drop instance " + instanceName + " - " + response.getMessage(), Response.Status.CONFLICT);
     }
     return new SuccessResponse("Successfully dropped instance");
+  }
+
+  @PUT
+  @Path("/instances/{instanceName}")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @ApiOperation(value = "Update the specified instance", consumes = MediaType.APPLICATION_JSON, notes = "Update specified instance with given instance config")
+  @ApiResponses(value = {@ApiResponse(code = 200, message = "Success"), @ApiResponse(code = 500, message = "Internal error")})
+  public SuccessResponse updateInstance(
+      @ApiParam(value = "Instance name", required = true, example = "Server_a.b.com_20000 | Broker_my.broker.com_30000") @PathParam("instanceName") String instanceName,
+      Instance instance) {
+    LOGGER.info("Instance update request received for instance: {}", instanceName);
+    PinotResourceManagerResponse response = pinotHelixResourceManager.updateInstance(instanceName, instance);
+    if (!response.isSuccessful()) {
+      throw new ControllerApplicationException(LOGGER, "Failure to update instance. Reason: " + response.getMessage(),
+          Response.Status.INTERNAL_SERVER_ERROR);
+    }
+    return new SuccessResponse("Instance successfully updated");
   }
 }

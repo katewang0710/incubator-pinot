@@ -21,30 +21,31 @@ package org.apache.pinot.core.minion;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.StringUtils;
-import org.apache.pinot.spi.data.FieldSpec;
-import org.apache.pinot.spi.data.MetricFieldSpec;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.segment.ReadMode;
-import org.apache.pinot.core.common.BlockSingleValIterator;
 import org.apache.pinot.core.common.DataSource;
 import org.apache.pinot.core.indexsegment.generator.SegmentVersion;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegment;
 import org.apache.pinot.core.indexsegment.immutable.ImmutableSegmentLoader;
 import org.apache.pinot.core.io.compression.ChunkCompressorFactory;
-import org.apache.pinot.core.segment.creator.SingleValueRawIndexCreator;
+import org.apache.pinot.core.io.writer.impl.BaseChunkSVForwardIndexWriter;
+import org.apache.pinot.core.segment.creator.ForwardIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.SegmentColumnarIndexCreator;
 import org.apache.pinot.core.segment.creator.impl.SegmentIndexCreationDriverImpl;
 import org.apache.pinot.core.segment.creator.impl.V1Constants;
-import org.apache.pinot.core.segment.index.ColumnMetadata;
-import org.apache.pinot.core.segment.index.SegmentMetadataImpl;
 import org.apache.pinot.core.segment.index.loader.IndexLoadingConfig;
+import org.apache.pinot.core.segment.index.metadata.ColumnMetadata;
+import org.apache.pinot.core.segment.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.core.segment.index.readers.Dictionary;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReader;
+import org.apache.pinot.core.segment.index.readers.ForwardIndexReaderContext;
 import org.apache.pinot.core.util.CrcUtils;
+import org.apache.pinot.spi.data.FieldSpec;
+import org.apache.pinot.spi.data.MetricFieldSpec;
+import org.apache.pinot.spi.data.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,6 +65,7 @@ import org.slf4j.LoggerFactory;
  * </ul>
  * <p>After the conversion, add "rawIndex" into the segment metadata "optimizations" field.
  */
+@SuppressWarnings({"rawtypes", "unchecked"})
 public class RawIndexConverter {
   private static final Logger LOGGER = LoggerFactory.getLogger(RawIndexConverter.class);
 
@@ -84,8 +86,8 @@ public class RawIndexConverter {
    * NOTE: original segment should be in V1 format.
    * TODO: support V3 format
    */
-  public RawIndexConverter(@Nonnull String rawTableName, @Nonnull File originalIndexDir,
-      @Nonnull File convertedIndexDir, @Nullable String columnsToConvert)
+  public RawIndexConverter(String rawTableName, File originalIndexDir, File convertedIndexDir,
+      @Nullable String columnsToConvert)
       throws Exception {
     FileUtils.copyDirectory(originalIndexDir, convertedIndexDir);
     IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig();
@@ -119,15 +121,15 @@ public class RawIndexConverter {
       for (String columnToConvert : StringUtils.split(_columnsToConvert, ',')) {
         FieldSpec fieldSpec = schema.getFieldSpecFor(columnToConvert);
         if (fieldSpec == null) {
-          LOGGER.warn("Skip converting column: {} because is does not exist in the schema");
+          LOGGER.warn("Skip converting column: {} because is does not exist in the schema", columnsToConvert);
           continue;
         }
         if (!fieldSpec.isSingleValueField()) {
-          LOGGER.warn("Skip converting column: {} because it's a multi-value column");
+          LOGGER.warn("Skip converting column: {} because it's a multi-value column", columnsToConvert);
           continue;
         }
         if (!_originalSegmentMetadata.hasDictionary(columnToConvert)) {
-          LOGGER.warn("Skip converting column: {} because its index is not dictionary-based");
+          LOGGER.warn("Skip converting column: {} because its index is not dictionary-based", columnsToConvert);
           continue;
         }
         columnsToConvert.add(fieldSpec);
@@ -165,10 +167,10 @@ public class RawIndexConverter {
 
     // In bits
     int lengthOfEachEntry;
-    if (dataType.equals(FieldSpec.DataType.STRING)) {
-      lengthOfEachEntry = columnMetadata.getColumnMaxLength() * Byte.SIZE;
-    } else {
+    if (dataType.isFixedWidth()) {
       lengthOfEachEntry = dataType.size() * Byte.SIZE;
+    } else {
+      lengthOfEachEntry = columnMetadata.getColumnMaxLength() * Byte.SIZE;
     }
     long dictionaryBasedIndexSize =
         (long) numTotalDocs * columnMetadata.getBitsPerElement() + (long) cardinality * lengthOfEachEntry;
@@ -196,17 +198,49 @@ public class RawIndexConverter {
 
     // Create the raw index
     DataSource dataSource = _originalImmutableSegment.getDataSource(columnName);
+    ForwardIndexReader reader = dataSource.getForwardIndex();
     Dictionary dictionary = dataSource.getDictionary();
+    assert dictionary != null;
     FieldSpec.DataType dataType = fieldSpec.getDataType();
+    int numDocs = _originalSegmentMetadata.getTotalDocs();
     int lengthOfLongestEntry = _originalSegmentMetadata.getColumnMetadataFor(columnName).getColumnMaxLength();
-    try (SingleValueRawIndexCreator rawIndexCreator = SegmentColumnarIndexCreator
+    try (ForwardIndexCreator rawIndexCreator = SegmentColumnarIndexCreator
         .getRawIndexCreatorForColumn(_convertedIndexDir, ChunkCompressorFactory.CompressionType.SNAPPY, columnName,
-            dataType, _originalSegmentMetadata.getTotalDocs(), lengthOfLongestEntry)) {
-      BlockSingleValIterator iterator = (BlockSingleValIterator) dataSource.nextBlock().getBlockValueSet().iterator();
-      int docId = 0;
-      while (iterator.hasNext()) {
-        int dictId = iterator.nextIntVal();
-        rawIndexCreator.index(docId++, dictionary.get(dictId));
+            dataType, numDocs, lengthOfLongestEntry, false, BaseChunkSVForwardIndexWriter.DEFAULT_VERSION);
+        ForwardIndexReaderContext readerContext = reader.createContext()) {
+      switch (dataType) {
+        case INT:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putInt(dictionary.getIntValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case LONG:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putLong(dictionary.getLongValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case FLOAT:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putFloat(dictionary.getFloatValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case DOUBLE:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putDouble(dictionary.getDoubleValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case STRING:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putString(dictionary.getStringValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        case BYTES:
+          for (int docId = 0; docId < numDocs; docId++) {
+            rawIndexCreator.putBytes(dictionary.getBytesValue(reader.getDictId(docId, readerContext)));
+          }
+          break;
+        default:
+          throw new IllegalStateException();
       }
     }
 

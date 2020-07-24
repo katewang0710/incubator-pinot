@@ -21,93 +21,21 @@ package org.apache.pinot.core.common;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
+/**
+ * The {@code BlockValSet} contains a block of values for a column (Projection layer) or a transform expression
+ * (Transform layer).
+ */
 public interface BlockValSet {
 
-  BlockValIterator iterator();
-
+  /**
+   * Returns the data type of the values in the value set.
+   */
   DataType getValueType();
 
+  /**
+   * Returns {@code true} if the value set is for a single-value column, {@code false} otherwise.
+   */
   boolean isSingleValue();
-
-  /**
-   * DOCUMENT ID BASED APIs
-   */
-
-  /**
-   * Get dictionary Ids for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outDictionaryIds Output array
-   * @param outStartPos Start position in outDictionaryIds
-   */
-  void getDictionaryIds(int[] inDocIds, int inStartPos, int inDocIdsSize, int[] outDictionaryIds, int outStartPos);
-
-  /**
-   * Get Integer values for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getIntValues(int[] inDocIds, int inStartPos, int inDocIdsSize, int[] outValues, int outStartPos);
-
-  /**
-   * Get long values for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getLongValues(int[] inDocIds, int inStartPos, int inDocIdsSize, long[] outValues, int outStartPos);
-
-  /**
-   * Get float values for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getFloatValues(int[] inDocIds, int inStartPos, int inDocIdsSize, float[] outValues, int outStartPos);
-
-  /**
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getDoubleValues(int[] inDocIds, int inStartPos, int inDocIdsSize, double[] outValues, int outStartPos);
-
-  /**
-   * Get string values for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getStringValues(int[] inDocIds, int inStartPos, int inDocIdsSize, String[] outValues, int outStartPos);
-
-  /**
-   * Get byte[] values for the given docIds.
-   *
-   * @param inDocIds Input docIds
-   * @param inStartPos Start index in inDocIds
-   * @param inDocIdsSize Number of input doc ids
-   * @param outValues Output array
-   * @param outStartPos Start position in outValues
-   */
-  void getBytesValues(int[] inDocIds, int inStartPos, int inDocIdsSize, byte[][] outValues, int outStartPos);
 
   /**
    * SINGLE-VALUED COLUMN APIs

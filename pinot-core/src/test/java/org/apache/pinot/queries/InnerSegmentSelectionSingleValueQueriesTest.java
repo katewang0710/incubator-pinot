@@ -18,11 +18,10 @@
  */
 package org.apache.pinot.queries;
 
-import java.io.Serializable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
+import java.util.PriorityQueue;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.operator.BaseOperator;
 import org.apache.pinot.core.operator.ExecutionStatistics;
@@ -42,13 +41,13 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     String query = "SELECT * FROM testTable LIMIT 0";
 
     // Test query without filter
-    EmptySelectionOperator emptySelectionOperator = getOperatorForQuery(query);
+    EmptySelectionOperator emptySelectionOperator = getOperatorForPqlQuery(query);
     IntermediateResultsBlock resultsBlock = emptySelectionOperator.nextBlock();
     ExecutionStatistics executionStatistics = emptySelectionOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 0L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     DataSchema selectionDataSchema = resultsBlock.getDataSchema();
     Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
     Assert.assertEquals(selectionDataSchema.size(), 11);
@@ -61,13 +60,13 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     Assert.assertTrue(resultsBlock.getSelectionResult().isEmpty());
 
     // Test query with filter
-    emptySelectionOperator = getOperatorForQueryWithFilter(query);
+    emptySelectionOperator = getOperatorForPqlQueryWithFilter(query);
     resultsBlock = emptySelectionOperator.nextBlock();
     executionStatistics = emptySelectionOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 0L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     selectionDataSchema = resultsBlock.getDataSchema();
     columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -86,13 +85,13 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     String query = "SELECT * FROM testTable";
 
     // Test query without filter
-    BaseOperator<IntermediateResultsBlock> selectionOnlyOperator = getOperatorForQuery(query);
+    BaseOperator<IntermediateResultsBlock> selectionOnlyOperator = getOperatorForPqlQuery(query);
     IntermediateResultsBlock resultsBlock = selectionOnlyOperator.nextBlock();
     ExecutionStatistics executionStatistics = selectionOnlyOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 10L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 110L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     DataSchema selectionDataSchema = resultsBlock.getDataSchema();
     Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
     Assert.assertEquals(selectionDataSchema.size(), 11);
@@ -103,21 +102,21 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column11")),
         DataSchema.ColumnDataType.STRING);
-    List<Serializable[]> selectionResult = (List<Serializable[]>) resultsBlock.getSelectionResult();
+    List<Object[]> selectionResult = (List<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
-    Serializable[] firstRow = selectionResult.get(0);
+    Object[] firstRow = selectionResult.get(0);
     Assert.assertEquals(firstRow.length, 11);
     Assert.assertEquals(((Integer) firstRow[columnIndexMap.get("column1")]).intValue(), 1578964907);
     Assert.assertEquals((String) firstRow[columnIndexMap.get("column11")], "P");
 
     // Test query with filter
-    selectionOnlyOperator = getOperatorForQueryWithFilter(query);
+    selectionOnlyOperator = getOperatorForPqlQueryWithFilter(query);
     resultsBlock = selectionOnlyOperator.nextBlock();
     executionStatistics = selectionOnlyOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 10L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 48241L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 110L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     selectionDataSchema = resultsBlock.getDataSchema();
     columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
     Assert.assertEquals(selectionDataSchema.size(), 11);
@@ -128,7 +127,7 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column11")),
         DataSchema.ColumnDataType.STRING);
-    selectionResult = (List<Serializable[]>) resultsBlock.getSelectionResult();
+    selectionResult = (List<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
     firstRow = selectionResult.get(0);
     Assert.assertEquals(firstRow.length, 11);
@@ -141,13 +140,13 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     String query = "SELECT" + SELECTION + " FROM testTable";
 
     // Test query without filter
-    BaseOperator<IntermediateResultsBlock> selectionOnlyOperator = getOperatorForQuery(query);
+    BaseOperator<IntermediateResultsBlock> selectionOnlyOperator = getOperatorForPqlQuery(query);
     IntermediateResultsBlock resultsBlock = selectionOnlyOperator.nextBlock();
     ExecutionStatistics executionStatistics = selectionOnlyOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 10L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 30L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     DataSchema selectionDataSchema = resultsBlock.getDataSchema();
     Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -158,21 +157,21 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column11")),
         DataSchema.ColumnDataType.STRING);
-    List<Serializable[]> selectionResult = (List<Serializable[]>) resultsBlock.getSelectionResult();
+    List<Object[]> selectionResult = (List<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
-    Serializable[] firstRow = selectionResult.get(0);
+    Object[] firstRow = selectionResult.get(0);
     Assert.assertEquals(firstRow.length, 3);
     Assert.assertEquals(((Integer) firstRow[0]).intValue(), 1578964907);
     Assert.assertEquals((String) firstRow[2], "P");
 
     // Test query with filter
-    selectionOnlyOperator = getOperatorForQueryWithFilter(query);
+    selectionOnlyOperator = getOperatorForPqlQueryWithFilter(query);
     resultsBlock = selectionOnlyOperator.nextBlock();
     executionStatistics = selectionOnlyOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 10L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 48241L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 30L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     selectionDataSchema = resultsBlock.getDataSchema();
     columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
     Assert.assertEquals(selectionDataSchema.size(), 3);
@@ -182,7 +181,7 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column11")),
         DataSchema.ColumnDataType.STRING);
-    selectionResult = (List<Serializable[]>) resultsBlock.getSelectionResult();
+    selectionResult = (List<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
     firstRow = selectionResult.get(0);
     Assert.assertEquals(firstRow.length, 3);
@@ -195,13 +194,14 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     String query = "SELECT" + SELECTION + " FROM testTable" + ORDER_BY;
 
     // Test query without filter
-    BaseOperator<IntermediateResultsBlock> selectionOrderByOperator = getOperatorForQuery(query);
+    BaseOperator<IntermediateResultsBlock> selectionOrderByOperator = getOperatorForPqlQuery(query);
     IntermediateResultsBlock resultsBlock = selectionOrderByOperator.nextBlock();
     ExecutionStatistics executionStatistics = selectionOrderByOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 30000L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
-    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 120000L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    // 30000 * (2 order-by columns + 1 docId column) + 10 * (2 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 90020L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     DataSchema selectionDataSchema = resultsBlock.getDataSchema();
     Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -212,21 +212,22 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
         DataSchema.ColumnDataType.INT);
-    Queue<Serializable[]> selectionResult = (Queue<Serializable[]>) resultsBlock.getSelectionResult();
+    PriorityQueue<Object[]> selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
-    Serializable[] lastRow = selectionResult.peek();
+    Object[] lastRow = selectionResult.peek();
     Assert.assertEquals(lastRow.length, 4);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column6")]).intValue(), 6043515);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column1")]).intValue(), 10542595);
 
     // Test query with filter
-    selectionOrderByOperator = getOperatorForQueryWithFilter(query);
+    selectionOrderByOperator = getOperatorForPqlQueryWithFilter(query);
     resultsBlock = selectionOrderByOperator.nextBlock();
     executionStatistics = selectionOrderByOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 6129L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 84134L);
-    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 24516L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    // 6129 * (2 order-by columns + 1 docId column) + 10 * (2 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 18407L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     selectionDataSchema = resultsBlock.getDataSchema();
     columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -237,7 +238,7 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
         DataSchema.ColumnDataType.INT);
-    selectionResult = (Queue<Serializable[]>) resultsBlock.getSelectionResult();
+    selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
     lastRow = selectionResult.peek();
     Assert.assertEquals(lastRow.length, 4);
@@ -250,13 +251,14 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
     String query = "SELECT * " + " FROM testTable" + ORDER_BY;
 
     // Test query without filter
-    BaseOperator<IntermediateResultsBlock> selectionOrderByOperator = getOperatorForQuery(query);
+    BaseOperator<IntermediateResultsBlock> selectionOrderByOperator = getOperatorForPqlQuery(query);
     IntermediateResultsBlock resultsBlock = selectionOrderByOperator.nextBlock();
     ExecutionStatistics executionStatistics = selectionOrderByOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 30000L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
-    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 330000L);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    // 30000 * (2 order-by columns + 1 docId column) + 10 * (9 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 90090L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     DataSchema selectionDataSchema = resultsBlock.getDataSchema();
     Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -268,21 +270,22 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
         DataSchema.ColumnDataType.INT);
-    Queue<Serializable[]> selectionResult = (Queue<Serializable[]>) resultsBlock.getSelectionResult();
+    PriorityQueue<Object[]> selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
-    Serializable[] lastRow = selectionResult.peek();
+    Object[] lastRow = selectionResult.peek();
     Assert.assertEquals(lastRow.length, 11);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column6")]).intValue(), 6043515);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column1")]).intValue(), 10542595);
 
     // Test query with filter
-    selectionOrderByOperator = getOperatorForQueryWithFilter(query);
+    selectionOrderByOperator = getOperatorForPqlQueryWithFilter(query);
     resultsBlock = selectionOrderByOperator.nextBlock();
     executionStatistics = selectionOrderByOperator.getExecutionStatistics();
     Assert.assertEquals(executionStatistics.getNumDocsScanned(), 6129L);
     Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 84134L);
-    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 67419);
-    Assert.assertEquals(executionStatistics.getNumTotalRawDocs(), 30000L);
+    // 6129 * (2 order-by columns + 1 docId column) + 10 * (9 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 18477L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
     selectionDataSchema = resultsBlock.getDataSchema();
     columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
 
@@ -294,12 +297,71 @@ public class InnerSegmentSelectionSingleValueQueriesTest extends BaseSingleValue
         DataSchema.ColumnDataType.INT);
     Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
         DataSchema.ColumnDataType.INT);
-    selectionResult = (Queue<Serializable[]>) resultsBlock.getSelectionResult();
+    selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
     Assert.assertEquals(selectionResult.size(), 10);
     lastRow = selectionResult.peek();
     Assert.assertEquals(lastRow.length, 11);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column6")]).intValue(), 6043515);
     Assert.assertEquals(((Integer) lastRow[columnIndexMap.get("column1")]).intValue(), 462769197);
+  }
+
+  @Test
+  public void testSelectStarOrderByLargeOffsetLimit() {
+    String query = "SELECT * " + " FROM testTable" + ORDER_BY + " LIMIT 5000, 7000";
+
+    // Test query without filter
+    BaseOperator<IntermediateResultsBlock> selectionOrderByOperator = getOperatorForPqlQuery(query);
+    IntermediateResultsBlock resultsBlock = selectionOrderByOperator.nextBlock();
+    ExecutionStatistics executionStatistics = selectionOrderByOperator.getExecutionStatistics();
+    Assert.assertEquals(executionStatistics.getNumDocsScanned(), 30000L);
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 0L);
+    // 30000 * (2 order-by columns + 1 docId column) + 12000 * (9 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 198000L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
+    DataSchema selectionDataSchema = resultsBlock.getDataSchema();
+    Map<String, Integer> columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
+
+    Assert.assertEquals(getVirtualColumns(selectionDataSchema), 0);
+    Assert.assertEquals(selectionDataSchema.size(), 11);
+    Assert.assertTrue(columnIndexMap.containsKey("column6"));
+    Assert.assertTrue(columnIndexMap.containsKey("column1"));
+    Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column6")),
+        DataSchema.ColumnDataType.INT);
+    Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
+        DataSchema.ColumnDataType.INT);
+    PriorityQueue<Object[]> selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
+    Assert.assertEquals(selectionResult.size(), 12000);
+    Object[] lastRow = selectionResult.peek();
+    Assert.assertEquals(lastRow.length, 11);
+    Assert.assertEquals((int) lastRow[columnIndexMap.get("column6")], 296467636);
+    Assert.assertEquals((int) lastRow[columnIndexMap.get("column1")], 1715964282);
+
+    // Test query with filter
+    selectionOrderByOperator = getOperatorForPqlQueryWithFilter(query);
+    resultsBlock = selectionOrderByOperator.nextBlock();
+    executionStatistics = selectionOrderByOperator.getExecutionStatistics();
+    Assert.assertEquals(executionStatistics.getNumDocsScanned(), 6129L);
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedInFilter(), 84134L);
+    // 6129 * (2 order-by columns + 1 docId column) + 6129 * (9 non-order-by columns)
+    Assert.assertEquals(executionStatistics.getNumEntriesScannedPostFilter(), 73548L);
+    Assert.assertEquals(executionStatistics.getNumTotalDocs(), 30000L);
+    selectionDataSchema = resultsBlock.getDataSchema();
+    columnIndexMap = computeColumnNameToIndexMap(selectionDataSchema);
+
+    Assert.assertEquals(getVirtualColumns(selectionDataSchema), 0);
+    Assert.assertEquals(selectionDataSchema.size(), 11);
+    Assert.assertTrue(columnIndexMap.containsKey("column6"));
+    Assert.assertTrue(columnIndexMap.containsKey("column1"));
+    Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column6")),
+        DataSchema.ColumnDataType.INT);
+    Assert.assertEquals(selectionDataSchema.getColumnDataType(columnIndexMap.get("column1")),
+        DataSchema.ColumnDataType.INT);
+    selectionResult = (PriorityQueue<Object[]>) resultsBlock.getSelectionResult();
+    Assert.assertEquals(selectionResult.size(), 6129);
+    lastRow = selectionResult.peek();
+    Assert.assertEquals(lastRow.length, 11);
+    Assert.assertEquals((int) lastRow[columnIndexMap.get("column6")], 499968041);
+    Assert.assertEquals((int) lastRow[columnIndexMap.get("column1")], 335520083);
   }
 
   private int getVirtualColumns(DataSchema selectionDataSchema) {

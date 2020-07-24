@@ -18,6 +18,8 @@
  */
 package org.apache.pinot.common.protocols;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -106,6 +108,7 @@ public class SegmentCompletionProtocol {
   public static final String COMMIT_TYPE_KEY = "isSplitCommitType";
   public static final String SEGMENT_LOCATION_KEY = "segmentLocation";
   public static final String CONTROLLER_VIP_URL_KEY = "controllerVipUrl";
+  public static final String STREAM_PARTITION_MSG_OFFSET_KEY = "streamPartitionMsgOffset";
 
   public static final String MSG_TYPE_CONSUMED = "segmentConsumed";
   public static final String MSG_TYPE_COMMIT = "segmentCommit";
@@ -119,6 +122,7 @@ public class SegmentCompletionProtocol {
   public static final String PARAM_SEGMENT_LOCATION = "location";
   public static final String PARAM_SEGMENT_NAME = "name";
   public static final String PARAM_OFFSET = "offset";
+  public static final String PARAM_STREAM_PARTITION_MSG_OFFSET = "streamPartitionMsgOffset";
   public static final String PARAM_INSTANCE_ID = "instance";
   public static final String PARAM_MEMORY_USED_BYTES = "memoryUsedBytes";
   public static final String PARAM_SEGMENT_SIZE_BYTES = "segmentSizeBytes";
@@ -186,7 +190,10 @@ public class SegmentCompletionProtocol {
           + (_params.getSegmentSizeBytes() <= 0 ? ""
           : ("&" + PARAM_SEGMENT_SIZE_BYTES + "=" + _params.getSegmentSizeBytes())) + (_params.getNumRows() <= 0 ? ""
           : ("&" + PARAM_ROW_COUNT + "=" + _params.getNumRows())) + (_params.getSegmentLocation() == null ? ""
-          : ("&" + PARAM_SEGMENT_LOCATION + "=" + _params.getSegmentLocation()));
+          : ("&" + PARAM_SEGMENT_LOCATION + "=" + _params.getSegmentLocation()))
+          + (_params.getStreamPartitionMsgOffset() == null ? ""
+          : ("&" + PARAM_STREAM_PARTITION_MSG_OFFSET + "=" + _params.getStreamPartitionMsgOffset()))
+          ;
     }
 
     public static class Params {
@@ -201,6 +208,7 @@ public class SegmentCompletionProtocol {
       private String _segmentLocation;
       private long _memoryUsedBytes;
       private long _segmentSizeBytes;
+      private String _streamPartitionMsgOffset;
 
       public Params() {
         _offset = -1L;
@@ -213,6 +221,7 @@ public class SegmentCompletionProtocol {
         _segmentLocation = null;
         _memoryUsedBytes = MEMORY_USED_BYTES_DEFAULT;
         _segmentSizeBytes = SEGMENT_SIZE_BYTES_DEFAULT;
+        _streamPartitionMsgOffset = null;
       }
 
       public Params(Params params) {
@@ -226,8 +235,10 @@ public class SegmentCompletionProtocol {
         _segmentLocation = params.getSegmentLocation();
         _memoryUsedBytes = params.getMemoryUsedBytes();
         _segmentSizeBytes = params.getSegmentSizeBytes();
+        _streamPartitionMsgOffset = params.getStreamPartitionMsgOffset();
       }
 
+      @Deprecated
       public Params withOffset(long offset) {
         _offset = offset;
         return this;
@@ -283,11 +294,24 @@ public class SegmentCompletionProtocol {
         return this;
       }
 
+      public Params withStreamPartitionMsgOffset(String offset) {
+        _streamPartitionMsgOffset = offset;
+        // Try to populate the offset if possible.
+        // TODO Issue 5359 Remove this code once we have both sides be able to live without _offset.
+        try {
+          _offset = Long.parseLong(_streamPartitionMsgOffset);
+        } catch (Exception e) {
+          // Ignore, if the recipient excepts _offset, it will return an error to the sender.
+        }
+        return this;
+      }
+
       public String getSegmentName() {
         return _segmentName;
       }
 
-      public long getOffset() {
+      @Deprecated
+      private long getOffset() {
         return _offset;
       }
 
@@ -327,11 +351,21 @@ public class SegmentCompletionProtocol {
         return _segmentSizeBytes;
       }
 
+      public String getStreamPartitionMsgOffset() {
+        if (_streamPartitionMsgOffset != null) {
+          return _streamPartitionMsgOffset;
+        } else {
+          // TODO 5359 remove this once we are all upgraded in controllers and servers.
+          return Long.toString(_offset);
+        }
+      }
+
       public String toString() {
         return "Offset: " + _offset + ",Segment name: " + _segmentName + ",Instance Id: " + _instanceId + ",Reason: "
             + _reason + ",NumRows: " + _numRows + ",BuildTimeMillis: " + _buildTimeMillis + ",WaitTimeMillis: "
             + _waitTimeMillis + ",ExtraTimeSec: " + _extraTimeSec + ",SegmentLocation: " + _segmentLocation
-            + ",MemoryUsedBytes: " + _memoryUsedBytes + ",SegmentSizeBytes: " + _segmentSizeBytes;
+            + ",MemoryUsedBytes: " + _memoryUsedBytes + ",SegmentSizeBytes: " + _segmentSizeBytes
+            + ",StreamPartitionMsgOffset: " + _streamPartitionMsgOffset;
       }
     }
   }
@@ -384,6 +418,7 @@ public class SegmentCompletionProtocol {
     }
   }
 
+  @JsonIgnoreProperties(ignoreUnknown = true)
   public static class Response {
     private ControllerResponseStatus _status;
     private long _offset = -1;
@@ -391,6 +426,7 @@ public class SegmentCompletionProtocol {
     private boolean _splitCommit;
     private String _segmentLocation;
     private String _controllerVipUrl;
+    private String _streamPartitionMsgOffset;
 
     public Response() {
     }
@@ -402,6 +438,7 @@ public class SegmentCompletionProtocol {
       _splitCommit = params.isSplitCommit();
       _segmentLocation = params.getSegmentLocation();
       _controllerVipUrl = params.getControllerVipUrl();
+      _streamPartitionMsgOffset = params.getStreamPartitionMsgOffset();
     }
 
     @JsonProperty(STATUS_KEY)
@@ -414,11 +451,24 @@ public class SegmentCompletionProtocol {
       _status = status;
     }
 
+    @Deprecated
     @JsonProperty(OFFSET_KEY)
     public long getOffset() {
       return _offset;
     }
 
+    // This method is called in the server when the controller responds with
+    // CATCH_UP response to segmentConsumed() API.
+    @JsonProperty(STREAM_PARTITION_MSG_OFFSET_KEY)
+    public String getStreamPartitionMsgOffset() {
+      return _streamPartitionMsgOffset;
+    }
+
+    public void setStreamPartitionMsgOffset(String streamPartitionMsgOffset) {
+      _streamPartitionMsgOffset = streamPartitionMsgOffset;
+    }
+
+    @Deprecated
     @JsonProperty(OFFSET_KEY)
     public void setOffset(long offset) {
       _offset = offset;
@@ -489,6 +539,7 @@ public class SegmentCompletionProtocol {
       private boolean _splitCommit;
       private String _segmentLocation;
       private String _controllerVipUrl;
+      private String _streamPartitionMsgOffset;
 
       public Params() {
         _offset = -1L;
@@ -497,11 +548,7 @@ public class SegmentCompletionProtocol {
         _splitCommit = false;
         _segmentLocation = null;
         _controllerVipUrl = null;
-      }
-
-      public Params withOffset(long offset) {
-        _offset = offset;
-        return this;
+        _streamPartitionMsgOffset = null;
       }
 
       public Params withStatus(ControllerResponseStatus status) {
@@ -529,11 +576,23 @@ public class SegmentCompletionProtocol {
         return this;
       }
 
+      public Params withStreamPartitionMsgOffset(String offset) {
+        _streamPartitionMsgOffset = offset;
+        // TODO Issue 5359 Remove the block below once we have both parties be fine without _offset being present.
+        try {
+          _offset = Long.parseLong(_streamPartitionMsgOffset);
+        } catch (Exception e) {
+          // Ignore. If the receiver expects _offset, it will return an error to the sender.
+        }
+        return this;
+      }
+
       public ControllerResponseStatus getStatus() {
         return _status;
       }
 
-      public long getOffset() {
+      @Deprecated
+      private long getOffset() {
         return _offset;
       }
 
@@ -551,6 +610,10 @@ public class SegmentCompletionProtocol {
 
       public String getControllerVipUrl() {
         return _controllerVipUrl;
+      }
+
+      public String getStreamPartitionMsgOffset() {
+        return _streamPartitionMsgOffset;
       }
     }
   }

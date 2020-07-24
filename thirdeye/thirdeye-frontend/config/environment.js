@@ -25,6 +25,8 @@ module.exports = function(environment) {
 
     https_only: false,
 
+    timeZone: "America/Los_Angeles",
+
     moment: {
       includeTimezone: 'all'
     },
@@ -34,11 +36,19 @@ module.exports = function(environment) {
       url: 'https://your-piwik.endpoint.com'
     },
 
+    'ember-d3': {
+      bundle: true
+    },
+
     docs: {
       createAlert: "/link/to/create/alert/wiki",
       detectionConfig: "/link/to/DetectionConfiguration/wiki",
-      subscriptionConfig: "/link/to/NotificationConfiguration/wiki"
+      subscriptionConfig: "/link/to/NotificationConfiguration/wiki",
+      cubeWiki: "/link/to/cubeAlgorithm/wiki"
     },
+
+    // used to split username if needed.  
+    userNameSplitToken: ' ',
 
     EmberENV: {
 

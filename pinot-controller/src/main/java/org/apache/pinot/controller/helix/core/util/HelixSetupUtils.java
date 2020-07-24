@@ -19,14 +19,14 @@
 package org.apache.pinot.controller.helix.core.util;
 
 import com.google.common.base.Preconditions;
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.helix.ConfigAccessor;
 import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixDataAccessor;
 import org.apache.helix.HelixManager;
 import org.apache.helix.controller.HelixControllerMain;
-import org.apache.helix.controller.rebalancer.strategy.CrushEdRebalanceStrategy;
 import org.apache.helix.manager.zk.ZKHelixAdmin;
 import org.apache.helix.manager.zk.ZKHelixDataAccessor;
 import org.apache.helix.manager.zk.ZKHelixManager;
@@ -43,6 +43,7 @@ import org.apache.helix.model.StateModelDefinition;
 import org.apache.helix.model.builder.CustomModeISBuilder;
 import org.apache.helix.model.builder.FullAutoModeISBuilder;
 import org.apache.helix.model.builder.HelixConfigScopeBuilder;
+import org.apache.pinot.common.utils.CommonConstants;
 import org.apache.pinot.common.utils.helix.LeadControllerUtils;
 import org.apache.pinot.controller.helix.core.PinotHelixBrokerResourceOnlineOfflineStateModelGenerator;
 import org.apache.pinot.controller.helix.core.PinotHelixSegmentOnlineOfflineStateModelGenerator;
@@ -74,13 +75,18 @@ public class HelixSetupUtils {
       // Enable Auto-Join for the cluster
       HelixConfigScope configScope =
           new HelixConfigScopeBuilder(ConfigScopeProperty.CLUSTER).forCluster(helixClusterName).build();
-      admin.setConfig(configScope, Collections.singletonMap(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, "true"));
+      Map<String, String> configMap = new HashMap<>();
+      configMap.put(ZKHelixManager.ALLOW_PARTICIPANT_AUTO_JOIN, Boolean.toString(true));
+      configMap.put(ENABLE_CASE_INSENSITIVE_KEY, Boolean.toString(false));
+      configMap.put(DEFAULT_HYPERLOGLOG_LOG2M_KEY, Integer.toString(DEFAULT_HYPERLOGLOG_LOG2M));
+      configMap.put(CommonConstants.Broker.CONFIG_OF_ENABLE_QUERY_LIMIT_OVERRIDE, Boolean.toString(false));
+      admin.setConfig(configScope, configMap);
       LOGGER.info("New Helix cluster: {} created", helixClusterName);
     }
   }
 
   public static void setupPinotCluster(String helixClusterName, String zkPath, boolean isUpdateStateModel,
-      boolean enableBatchMessageMode) {
+      boolean enableBatchMessageMode, String leadControllerResourceRebalanceStrategy) {
     HelixZkClient zkClient = null;
     try {
       zkClient = SharedZkClientFactory.getInstance().buildZkClient(new HelixZkClient.ZkConnectionConfig(zkPath),
@@ -102,7 +108,8 @@ public class HelixSetupUtils {
       createBrokerResourceIfNeeded(helixClusterName, helixAdmin, enableBatchMessageMode);
 
       // Add lead controller resource if needed
-      createLeadControllerResourceIfNeeded(helixClusterName, helixAdmin, configAccessor, enableBatchMessageMode);
+      createLeadControllerResourceIfNeeded(helixClusterName, helixAdmin, configAccessor, enableBatchMessageMode,
+          leadControllerResourceRebalanceStrategy);
     } finally {
       if (zkClient != null) {
         zkClient.close();
@@ -148,15 +155,15 @@ public class HelixSetupUtils {
   }
 
   private static void createLeadControllerResourceIfNeeded(String helixClusterName, HelixAdmin helixAdmin,
-      ConfigAccessor configAccessor, boolean enableBatchMessageMode) {
+      ConfigAccessor configAccessor, boolean enableBatchMessageMode, String leadControllerResourceRebalanceStrategy) {
     IdealState idealState = helixAdmin.getResourceIdealState(helixClusterName, LEAD_CONTROLLER_RESOURCE_NAME);
     if (idealState == null) {
       LOGGER.info("Adding resource: {}", LEAD_CONTROLLER_RESOURCE_NAME);
 
-      // FULL-AUTO Master-Slave state model with CrushED rebalance strategy
+      // FULL-AUTO Master-Slave state model with a rebalance strategy, auto-rebalance by default
       FullAutoModeISBuilder idealStateBuilder = new FullAutoModeISBuilder(LEAD_CONTROLLER_RESOURCE_NAME);
       idealStateBuilder.setStateModel(MasterSlaveSMD.name)
-          .setRebalanceStrategy(CrushEdRebalanceStrategy.class.getName());
+          .setRebalanceStrategy(leadControllerResourceRebalanceStrategy);
       // Initialize partitions and replicas
       idealStateBuilder.setNumPartitions(NUMBER_OF_PARTITIONS_IN_LEAD_CONTROLLER_RESOURCE);
       for (int i = 0; i < NUMBER_OF_PARTITIONS_IN_LEAD_CONTROLLER_RESOURCE; i++) {

@@ -20,7 +20,8 @@ package org.apache.pinot.core.query.pruner;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.pinot.core.indexsegment.IndexSegment;
+import org.apache.pinot.core.data.manager.SegmentDataManager;
+import org.apache.pinot.core.data.manager.TableDataManager;
 import org.apache.pinot.core.query.config.SegmentPrunerConfig;
 import org.apache.pinot.core.query.request.ServerQueryRequest;
 import org.slf4j.Logger;
@@ -37,7 +38,7 @@ public class SegmentPrunerService {
   private final List<SegmentPruner> _segmentPruners;
 
   public SegmentPrunerService(SegmentPrunerConfig config) {
-    int numPruners = config.numberOfSegmentPruner();
+    int numPruners = config.numSegmentPruners();
     _segmentPruners = new ArrayList<>(numPruners);
     for (int i = 0; i < numPruners; i++) {
       LOGGER.info("Adding segment pruner: " + config.getSegmentPrunerName(i));
@@ -47,15 +48,13 @@ public class SegmentPrunerService {
   }
 
   /**
-   * Returns <code>true</code> if the segment can be pruned based on the query request.
+   * Prunes the segments based on the query request, returns the segments that are not pruned.
    */
-  public boolean prune(IndexSegment segment, ServerQueryRequest queryRequest) {
+  public List<SegmentDataManager> prune(TableDataManager tableDataManager, List<SegmentDataManager> segmentDataManagers,
+      ServerQueryRequest queryRequest) {
     for (SegmentPruner segmentPruner : _segmentPruners) {
-      if (segmentPruner.prune(segment, queryRequest)) {
-        LOGGER.debug("Pruned segment: {}", segment.getSegmentName());
-        return true;
-      }
+      segmentDataManagers = segmentPruner.prune(tableDataManager, segmentDataManagers, queryRequest);
     }
-    return false;
+    return segmentDataManagers;
   }
 }

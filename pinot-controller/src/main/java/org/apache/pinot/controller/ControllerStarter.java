@@ -18,32 +18,36 @@
  */
 package org.apache.pinot.controller;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.primitives.Longs;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.yammer.metrics.core.MetricsRegistry;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.configuration.Configuration;
+
 import org.apache.commons.httpclient.HttpConnectionManager;
 import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.commons.io.FileUtils;
+import org.apache.helix.HelixAdmin;
 import org.apache.helix.HelixManager;
 import org.apache.helix.HelixManagerFactory;
 import org.apache.helix.InstanceType;
 import org.apache.helix.SystemPropertyKeys;
 import org.apache.helix.api.listeners.ControllerChangeListener;
+import org.apache.helix.model.ClusterConstraints;
+import org.apache.helix.model.ConstraintItem;
 import org.apache.helix.model.MasterSlaveSMD;
+import org.apache.helix.model.Message;
 import org.apache.helix.task.TaskDriver;
 import org.apache.pinot.common.Utils;
+import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.common.metrics.MetricsHelper;
@@ -56,6 +60,7 @@ import org.apache.pinot.common.utils.helix.LeadControllerUtils;
 import org.apache.pinot.controller.api.ControllerAdminApiApplication;
 import org.apache.pinot.controller.api.access.AccessControlFactory;
 import org.apache.pinot.controller.api.events.MetadataEventNotifierFactory;
+import org.apache.pinot.controller.api.listeners.ListenerConfig;
 import org.apache.pinot.controller.api.resources.ControllerFilePathProvider;
 import org.apache.pinot.controller.api.resources.InvalidControllerConfigException;
 import org.apache.pinot.controller.helix.SegmentStatusChecker;
@@ -70,27 +75,38 @@ import org.apache.pinot.controller.helix.core.retention.RetentionManager;
 import org.apache.pinot.controller.helix.core.statemodel.LeadControllerResourceMasterSlaveStateModelFactory;
 import org.apache.pinot.controller.helix.core.util.HelixSetupUtils;
 import org.apache.pinot.controller.helix.starter.HelixConfig;
+import org.apache.pinot.controller.util.ListenerConfigUtil;
 import org.apache.pinot.controller.validation.BrokerResourceValidationManager;
 import org.apache.pinot.controller.validation.OfflineSegmentIntervalChecker;
 import org.apache.pinot.controller.validation.RealtimeSegmentValidationManager;
 import org.apache.pinot.core.periodictask.PeriodicTask;
 import org.apache.pinot.core.periodictask.PeriodicTaskScheduler;
 import org.apache.pinot.spi.crypt.PinotCrypterFactory;
+import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
+import org.apache.pinot.spi.services.ServiceRole;
+import org.apache.pinot.spi.services.ServiceStartable;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.primitives.Longs;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.yammer.metrics.core.MetricsRegistry;
 
-public class ControllerStarter {
+
+public class ControllerStarter implements ServiceStartable {
   private static final Logger LOGGER = LoggerFactory.getLogger(ControllerStarter.class);
 
   private static final String METRICS_REGISTRY_NAME = "pinot.controller.metrics";
   private static final Long DATA_DIRECTORY_MISSING_VALUE = 1000000L;
   private static final Long DATA_DIRECTORY_EXCEPTION_VALUE = 1100000L;
   private static final String METADATA_EVENT_NOTIFIER_PREFIX = "metadata.event.notifier";
+  private static final String MAX_STATE_TRANSITIONS_PER_INSTANCE =  "MaxStateTransitionsPerInstance";
 
   private final ControllerConf _config;
+  private final List<ListenerConfig> _listenerConfigs;
   private final ControllerAdminApiApplication _adminApp;
   // TODO: rename this variable once it's full separated with Helix controller.
   private final PinotHelixResourceManager _helixResourceManager;
@@ -134,8 +150,11 @@ public class ControllerStarter {
     // Helix related settings.
     _helixZkURL = HelixConfig.getAbsoluteZkPathForHelix(_config.getZkStr());
     _helixClusterName = _config.getHelixClusterName();
+    _listenerConfigs = ListenerConfigUtil.buildListenerConfigs(_config);
+    
     String host = conf.getControllerHost();
-    int port = Integer.parseInt(conf.getControllerPort());
+    int port = inferPort();
+    
     _helixControllerInstanceId = host + "_" + port;
     _helixParticipantInstanceId = LeadControllerUtils.generateParticipantInstanceId(host, port);
     _isUpdateStateModel = _config.isUpdateSegmentStateModel();
@@ -149,8 +168,10 @@ public class ControllerStarter {
       _helixResourceManager = null;
       _executorService = null;
     } else {
-      _adminApp =
-          new ControllerAdminApiApplication(_config.getQueryConsoleWebappPath(), _config.getQueryConsoleUseHttps());
+      // Initialize FunctionRegistry before starting the admin application (PinotQueryResource requires it to compile
+      // queries)
+      FunctionRegistry.init();
+      _adminApp = new ControllerAdminApiApplication();
       // Do not use this before the invocation of {@link PinotHelixResourceManager::start()}, which happens in {@link ControllerStarter::start()}
       _helixResourceManager = new PinotHelixResourceManager(_config);
       _executorService =
@@ -160,7 +181,7 @@ public class ControllerStarter {
 
   private void inferHostnameIfNeeded(ControllerConf config) {
     if (config.getControllerHost() == null) {
-      if (config.getBoolean(CommonConstants.Helix.SET_INSTANCE_ID_TO_HOSTNAME_KEY, false)) {
+      if (config.getProperty(CommonConstants.Helix.SET_INSTANCE_ID_TO_HOSTNAME_KEY, false)) {
         final String inferredHostname = NetUtil.getHostnameOrAddress();
         if (inferredHostname != null) {
           config.setControllerHost(inferredHostname);
@@ -172,13 +193,35 @@ public class ControllerStarter {
     }
   }
 
+  private int inferPort() {
+    return Optional.ofNullable(_config.getControllerPort()).map(Integer::parseInt)
+
+        // Fall back to protocol listeners if legacy controller.port is undefined. 
+        .orElseGet(() -> _listenerConfigs.stream().findFirst().map(ListenerConfig::getPort).get());
+  }
+
   private void setupHelixSystemProperties() {
     // NOTE: Helix will disconnect the manager and disable the instance if it detects flapping (too frequent disconnect
     // from ZooKeeper). Setting flapping time window to a small value can avoid this from happening. Helix ignores the
     // non-positive value, so set the default value as 1.
     System.setProperty(SystemPropertyKeys.FLAPPING_TIME_WINDOW, _config
-        .getString(CommonConstants.Helix.CONFIG_OF_CONTROLLER_FLAPPING_TIME_WINDOW_MS,
+        .getProperty(CommonConstants.Helix.CONFIG_OF_CONTROLLER_FLAPPING_TIME_WINDOW_MS,
             CommonConstants.Helix.DEFAULT_FLAPPING_TIME_WINDOW_MS));
+  }
+
+  private void setupHelixClusterConstraints() {
+    String maxStateTransitions = _config
+        .getProperty(CommonConstants.Helix.CONFIG_OF_HELIX_INSTANCE_MAX_STATE_TRANSITIONS,
+            CommonConstants.Helix.DEFAULT_HELIX_INSTANCE_MAX_STATE_TRANSITIONS);
+    Map<ClusterConstraints.ConstraintAttribute, String> constraintAttributes = new HashMap<>();
+    constraintAttributes.put(ClusterConstraints.ConstraintAttribute.INSTANCE, ".*");
+    constraintAttributes
+        .put(ClusterConstraints.ConstraintAttribute.MESSAGE_TYPE, Message.MessageType.STATE_TRANSITION.name());
+    ConstraintItem constraintItem = new ConstraintItem(constraintAttributes, maxStateTransitions);
+
+    _helixControllerManager.getClusterManagmentTool()
+        .setConstraint(_helixClusterName, ClusterConstraints.ConstraintType.MESSAGE_CONSTRAINT,
+            MAX_STATE_TRANSITIONS_PER_INSTANCE, constraintItem);
   }
 
   public PinotHelixResourceManager getHelixResourceManager() {
@@ -216,6 +259,22 @@ public class ControllerStarter {
     return _taskManager;
   }
 
+  @Override
+  public ServiceRole getServiceRole() {
+    return ServiceRole.CONTROLLER;
+  }
+
+  @Override
+  public String getInstanceId() {
+    return _helixParticipantInstanceId;
+  }
+
+  @Override
+  public PinotConfiguration getConfig() {
+    return _config;
+  }
+
+  @Override
   public void start() {
     LOGGER.info("Starting Pinot controller in mode: {}.", _controllerMode.name());
     Utils.logVersions();
@@ -241,7 +300,7 @@ public class ControllerStarter {
     }
 
     ServiceStatus
-        .setServiceStatusCallback(new ServiceStatus.MultipleCallbackServiceStatusCallback(_serviceStatusCallbackList));
+        .setServiceStatusCallback(_helixParticipantInstanceId, new ServiceStatus.MultipleCallbackServiceStatusCallback(_serviceStatusCallbackList));
   }
 
   private void setUpHelixController() {
@@ -259,11 +318,15 @@ public class ControllerStarter {
         () -> _controllerMetrics.addMeteredGlobalValue(ControllerMeter.HELIX_ZOOKEEPER_RECONNECTS, 1L));
 
     _serviceStatusCallbackList.add(generateServiceStatusCallback(_helixControllerManager));
+
+    // setup up constraint
+    setupHelixClusterConstraints();
   }
 
   private void setUpPinotController() {
     // Set up Pinot cluster in Helix if needed
-    HelixSetupUtils.setupPinotCluster(_helixClusterName, _helixZkURL, _isUpdateStateModel, _enableBatchMessageMode);
+    HelixSetupUtils.setupPinotCluster(_helixClusterName, _helixZkURL, _isUpdateStateModel, _enableBatchMessageMode,
+        _config.getLeadControllerResourceRebalanceStrategy());
 
     // Start all components
     initPinotFSFactory();
@@ -331,8 +394,6 @@ public class ControllerStarter {
     final MetadataEventNotifierFactory metadataEventNotifierFactory =
         MetadataEventNotifierFactory.loadFactory(_config.subset(METADATA_EVENT_NOTIFIER_PREFIX));
 
-    int jerseyPort = Integer.parseInt(_config.getControllerPort());
-
     LOGGER.info("Controller download url base: {}", _config.generateVipUrl());
     LOGGER.info("Injecting configuration and resource managers to the API context");
     final MultiThreadedHttpConnectionManager connectionManager = new MultiThreadedHttpConnectionManager();
@@ -355,11 +416,10 @@ public class ControllerStarter {
       }
     });
 
-    _adminApp.start(jerseyPort);
-    LOGGER.info("Started Jersey API on port {}", jerseyPort);
-    LOGGER.info("Pinot controller ready and listening on port {} for API requests", _config.getControllerPort());
-    LOGGER.info("Controller services available at http://{}:{}/", _config.getControllerHost(),
-        _config.getControllerPort());
+    _adminApp.start(_listenerConfigs, ListenerConfigUtil.shouldAdvertiseAsHttps(_listenerConfigs, _config));
+
+    _listenerConfigs.stream().forEach(listenerConfig -> LOGGER.info("Controller services available at {}://{}:{}/",
+        listenerConfig.getProtocol(), listenerConfig.getHost(), listenerConfig.getPort()));
 
     _controllerMetrics.addCallbackGauge("dataDir.exists", () -> new File(_config.getDataDir()).exists() ? 1L : 0L);
     _controllerMetrics.addCallbackGauge("dataDir.fileOpLatencyMs", () -> {
@@ -419,9 +479,9 @@ public class ControllerStarter {
   }
 
   private void initPinotFSFactory() {
-    Configuration pinotFSConfig = _config.subset(CommonConstants.Controller.PREFIX_OF_CONFIG_OF_PINOT_FS_FACTORY);
     LOGGER.info("Initializing PinotFSFactory");
-    PinotFSFactory.init(pinotFSConfig);
+    
+    PinotFSFactory.init(_config.subset(CommonConstants.Controller.PREFIX_OF_CONFIG_OF_PINOT_FS_FACTORY));
   }
 
   private void initControllerFilePathProvider() {
@@ -434,7 +494,7 @@ public class ControllerStarter {
   }
 
   private void initSegmentFetcherFactory() {
-    Configuration segmentFetcherFactoryConfig =
+    PinotConfiguration segmentFetcherFactoryConfig =
         _config.subset(CommonConstants.Controller.PREFIX_OF_CONFIG_OF_SEGMENT_FETCHER_FACTORY);
     LOGGER.info("Initializing SegmentFetcherFactory");
     try {
@@ -445,7 +505,7 @@ public class ControllerStarter {
   }
 
   private void initPinotCrypterFactory() {
-    Configuration pinotCrypterConfig = _config.subset(CommonConstants.Controller.PREFIX_OF_CONFIG_OF_PINOT_CRYPTER);
+    PinotConfiguration pinotCrypterConfig = _config.subset(CommonConstants.Controller.PREFIX_OF_CONFIG_OF_PINOT_CRYPTER);
     LOGGER.info("Initializing PinotCrypterFactory");
     try {
       PinotCrypterFactory.init(pinotCrypterConfig);
@@ -526,6 +586,7 @@ public class ControllerStarter {
     return periodicTasks;
   }
 
+  @Override
   public void stop() {
     switch (_controllerMode) {
       case DUAL:
@@ -539,6 +600,11 @@ public class ControllerStarter {
         stopHelixController();
         break;
     }
+    LOGGER.info("Deregistering service status handler");
+    ServiceStatus.removeServiceStatusCallback(_helixParticipantInstanceId);
+    LOGGER.info("Shutdown Controller Metrics Registry");
+    _metricsRegistry.shutdown();
+    LOGGER.info("Finish shutting down Pinot controller for {}", _helixParticipantInstanceId);
   }
 
   private void stopHelixController() {
@@ -616,7 +682,7 @@ public class ControllerStarter {
     }
 
     conf.setControllerVipHost("localhost");
-    conf.setControllerVipProtocol("http");
+    conf.setControllerVipProtocol(CommonConstants.HTTP_PROTOCOL);
     conf.setRetentionControllerFrequencyInSeconds(3600 * 6);
     conf.setOfflineSegmentIntervalCheckerFrequencyInSeconds(3600);
     conf.setRealtimeSegmentValidationFrequencyInSeconds(3600);

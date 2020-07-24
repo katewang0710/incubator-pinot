@@ -19,12 +19,12 @@
 package org.apache.pinot.core.data.readers;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Set;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
@@ -49,7 +49,7 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
    *
    * @param indexDirs a list of input segment directory paths
    */
-  public MultiplePinotSegmentRecordReader(@Nonnull List<File> indexDirs)
+  public MultiplePinotSegmentRecordReader(List<File> indexDirs)
       throws Exception {
     this(indexDirs, null, null);
   }
@@ -64,7 +64,7 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
    * @param schema input schema that is a subset of the segment schema
    * @param sortOrder a list of column names that represent the sorting order
    */
-  public MultiplePinotSegmentRecordReader(@Nonnull List<File> indexDirs, @Nullable Schema schema,
+  public MultiplePinotSegmentRecordReader(List<File> indexDirs, @Nullable Schema schema,
       @Nullable List<String> sortOrder)
       throws Exception {
     // Initialize pinot segment record readers
@@ -77,8 +77,8 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
     if (schema == null) {
       // Validate that segment schemas from all segments are the same if the schema is not passed.
       Set<Schema> schemas = new HashSet<>();
-      for (PinotSegmentRecordReader reader : _pinotSegmentRecordReaders) {
-        schemas.add(reader.getSchema());
+      for (PinotSegmentRecordReader pinotSegmentRecordReader : _pinotSegmentRecordReaders) {
+        schemas.add(pinotSegmentRecordReader.getSchema());
       }
       if (schemas.size() == 1) {
         _schema = schemas.iterator().next();
@@ -102,6 +102,10 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
     }
   }
 
+  public Schema getSchema() {
+    return _schema;
+  }
+
   /**
    * Indicate whether the segment should be sorted or not
    */
@@ -110,7 +114,7 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
   }
 
   @Override
-  public void init(File dataFile, Schema schema, @Nullable RecordReaderConfig recordReaderConfig) {
+  public void init(File dataFile, Set<String> fieldsToRead, @Nullable RecordReaderConfig recordReaderConfig) {
   }
 
   @Override
@@ -184,12 +188,8 @@ public class MultiplePinotSegmentRecordReader implements RecordReader {
   }
 
   @Override
-  public Schema getSchema() {
-    return _schema;
-  }
-
-  @Override
-  public void close() {
+  public void close()
+      throws IOException {
     for (PinotSegmentRecordReader recordReader : _pinotSegmentRecordReaders) {
       recordReader.close();
     }

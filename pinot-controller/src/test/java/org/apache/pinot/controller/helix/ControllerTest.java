@@ -18,7 +18,15 @@
  */
 package org.apache.pinot.controller.helix;
 
-import com.google.common.base.Preconditions;
+import static org.apache.pinot.common.utils.CommonConstants.Helix.LEAD_CONTROLLER_RESOURCE_ENABLED_KEY;
+import static org.apache.pinot.common.utils.CommonConstants.Helix.LEAD_CONTROLLER_RESOURCE_NAME;
+import static org.apache.pinot.common.utils.CommonConstants.Helix.UNTAGGED_BROKER_INSTANCE;
+import static org.apache.pinot.common.utils.CommonConstants.Helix.UNTAGGED_SERVER_INSTANCE;
+import static org.apache.pinot.common.utils.CommonConstants.Helix.Instance.ADMIN_PORT_KEY;
+import static org.apache.pinot.common.utils.CommonConstants.Server.DEFAULT_ADMIN_API_PORT;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
@@ -31,8 +39,10 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
 import org.apache.commons.httpclient.HttpClient;
 import org.apache.commons.httpclient.methods.PostMethod;
 import org.apache.commons.httpclient.methods.PutMethod;
@@ -59,27 +69,26 @@ import org.apache.helix.participant.statemachine.StateModelFactory;
 import org.apache.helix.participant.statemachine.StateModelInfo;
 import org.apache.helix.participant.statemachine.Transition;
 import org.apache.helix.store.zk.ZkHelixPropertyStore;
-import org.apache.pinot.common.config.TagNameUtils;
-import org.apache.pinot.common.config.Tenant;
+import org.apache.pinot.common.utils.CommonConstants;
+import org.apache.pinot.common.utils.ZkStarter;
+import org.apache.pinot.common.utils.config.TagNameUtils;
+import org.apache.pinot.controller.ControllerConf;
+import org.apache.pinot.controller.ControllerStarter;
+import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.config.tenant.Tenant;
+import org.apache.pinot.spi.config.tenant.TenantRole;
 import org.apache.pinot.spi.data.DimensionFieldSpec;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.MetricFieldSpec;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.common.utils.TenantRole;
-import org.apache.pinot.common.utils.ZkStarter;
-import org.apache.pinot.controller.ControllerConf;
-import org.apache.pinot.controller.ControllerStarter;
-import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 
-import static org.apache.pinot.common.utils.CommonConstants.Helix.Instance.ADMIN_PORT_KEY;
-import static org.apache.pinot.common.utils.CommonConstants.Helix.LEAD_CONTROLLER_RESOURCE_ENABLED_KEY;
-import static org.apache.pinot.common.utils.CommonConstants.Helix.LEAD_CONTROLLER_RESOURCE_NAME;
-import static org.apache.pinot.common.utils.CommonConstants.Helix.UNTAGGED_BROKER_INSTANCE;
-import static org.apache.pinot.common.utils.CommonConstants.Helix.UNTAGGED_SERVER_INSTANCE;
-import static org.apache.pinot.common.utils.CommonConstants.Server.DEFAULT_ADMIN_API_PORT;
+import com.google.common.base.Preconditions;
 
 
 /**
@@ -129,23 +138,26 @@ public abstract class ControllerTest {
     }
   }
 
-  public ControllerConf getDefaultControllerConfiguration() {
-    ControllerConf config = new ControllerConf();
-    config.setControllerHost(LOCAL_HOST);
-    config.setControllerPort(Integer.toString(DEFAULT_CONTROLLER_PORT));
-    config.setDataDir(DEFAULT_DATA_DIR);
-    config.setZkStr(ZkStarter.DEFAULT_ZK_STR);
-    config.setHelixClusterName(getHelixClusterName());
+  public Map<String, Object> getDefaultControllerConfiguration() {
+    Map<String, Object> properties = new HashMap<>();
+    
+    properties.put(ControllerConf.CONTROLLER_HOST, LOCAL_HOST);
+    properties.put(ControllerConf.CONTROLLER_PORT, DEFAULT_CONTROLLER_PORT);
+    properties.put(ControllerConf.DATA_DIR, DEFAULT_DATA_DIR);
+    properties.put(ControllerConf.ZK_STR, ZkStarter.DEFAULT_ZK_STR);
+    properties.put(ControllerConf.HELIX_CLUSTER_NAME, getHelixClusterName());
 
-    return config;
+    return properties;
   }
 
   protected void startController() {
     startController(getDefaultControllerConfiguration());
   }
 
-  protected void startController(ControllerConf config) {
+  protected void startController(Map<String, Object> properties) {
     Preconditions.checkState(_controllerStarter == null);
+    
+    ControllerConf config = new ControllerConf(properties);
 
     _controllerPort = Integer.valueOf(config.getControllerPort());
     _controllerBaseApiUrl = "http://localhost:" + _controllerPort;
@@ -157,8 +169,11 @@ public abstract class ControllerTest {
     _helixResourceManager = _controllerStarter.getHelixResourceManager();
     _helixManager = _controllerStarter.getHelixControllerManager();
     _helixDataAccessor = _helixManager.getHelixDataAccessor();
-
+    ConfigAccessor configAccessor = _helixManager.getConfigAccessor();
     // HelixResourceManager is null in Helix only mode, while HelixManager is null in Pinot only mode.
+    HelixConfigScope scope =
+        new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(getHelixClusterName())
+            .build();
     switch (_controllerStarter.getControllerMode()) {
       case DUAL:
       case PINOT_ONLY:
@@ -167,16 +182,17 @@ public abstract class ControllerTest {
 
         // TODO: Enable periodic rebalance per 10 seconds as a temporary work-around for the Helix issue:
         //       https://github.com/apache/helix/issues/331. Remove this after Helix fixing the issue.
-        _helixAdmin.setConfig(
-            new HelixConfigScopeBuilder(HelixConfigScope.ConfigScopeProperty.CLUSTER).forCluster(getHelixClusterName())
-                .build(),
-            Collections.singletonMap(ClusterConfig.ClusterConfigProperty.REBALANCE_TIMER_PERIOD.name(), "10000"));
+        configAccessor.set(scope, ClusterConfig.ClusterConfigProperty.REBALANCE_TIMER_PERIOD.name(), "10000");
         break;
       case HELIX_ONLY:
         _helixAdmin = _helixManager.getClusterManagmentTool();
         _propertyStore = _helixManager.getHelixPropertyStore();
         break;
     }
+    //enable case insensitive pql for test cases.
+    configAccessor.set(scope, CommonConstants.Helix.ENABLE_CASE_INSENSITIVE_KEY, Boolean.toString(true));
+    //Set hyperloglog log2m value to 12.
+    configAccessor.set(scope, CommonConstants.Helix.DEFAULT_HYPERLOGLOG_LOG2M_KEY, Integer.toString(12));
   }
 
   protected ControllerStarter getControllerStarter(ControllerConf config) {
@@ -380,6 +396,16 @@ public abstract class ControllerTest {
     _fakeInstanceHelixManagers.clear();
   }
 
+  protected void stopFakeInstance(String instanceId) {
+    for (HelixManager helixManager : _fakeInstanceHelixManagers) {
+      if (helixManager.getInstanceName().equalsIgnoreCase(instanceId)) {
+        helixManager.disconnect();
+        _fakeInstanceHelixManagers.remove(helixManager);
+        return;
+      }
+    }
+  }
+
   protected Schema createDummySchema(String tableName) {
     Schema schema = new Schema();
     schema.setSchemaName(tableName);
@@ -404,7 +430,58 @@ public abstract class ControllerTest {
       throws IOException {
     String url = _controllerRequestURLBuilder.forSchemaCreate();
     PostMethod postMethod = sendMultipartPostRequest(url, schema.toSingleLineJsonString());
-    Assert.assertEquals(postMethod.getStatusCode(), 200);
+    assertEquals(postMethod.getStatusCode(), 200);
+  }
+
+  protected Schema getSchema(String schemaName) {
+    Schema schema = _helixResourceManager.getSchema(schemaName);
+    assertNotNull(schema);
+    return schema;
+  }
+
+  protected void addTableConfig(TableConfig tableConfig)
+      throws IOException {
+    sendPostRequest(_controllerRequestURLBuilder.forTableCreate(), tableConfig.toJsonString());
+  }
+
+  protected void updateTableConfig(TableConfig tableConfig)
+      throws IOException {
+    sendPutRequest(_controllerRequestURLBuilder.forUpdateTableConfig(tableConfig.getTableName()),
+        tableConfig.toJsonString());
+  }
+
+  protected TableConfig getOfflineTableConfig(String tableName) {
+    TableConfig offlineTableConfig = _helixResourceManager.getOfflineTableConfig(tableName);
+    Assert.assertNotNull(offlineTableConfig);
+    return offlineTableConfig;
+  }
+
+  protected TableConfig getRealtimeTableConfig(String tableName) {
+    TableConfig realtimeTableConfig = _helixResourceManager.getRealtimeTableConfig(tableName);
+    Assert.assertNotNull(realtimeTableConfig);
+    return realtimeTableConfig;
+  }
+
+  protected void dropOfflineTable(String tableName)
+      throws IOException {
+    sendDeleteRequest(
+        _controllerRequestURLBuilder.forTableDelete(TableNameBuilder.OFFLINE.tableNameWithType(tableName)));
+  }
+
+  protected void dropRealtimeTable(String tableName)
+      throws IOException {
+    sendDeleteRequest(
+        _controllerRequestURLBuilder.forTableDelete(TableNameBuilder.REALTIME.tableNameWithType(tableName)));
+  }
+
+  protected void reloadOfflineTable(String tableName)
+      throws IOException {
+    sendPostRequest(_controllerRequestURLBuilder.forTableReload(tableName, TableType.OFFLINE.name()), null);
+  }
+
+  protected void reloadRealtimeTable(String tableName)
+      throws IOException {
+    sendPostRequest(_controllerRequestURLBuilder.forTableReload(tableName, TableType.REALTIME.name()), null);
   }
 
   protected String getBrokerTenantRequestPayload(String tenantName, int numBrokers) {

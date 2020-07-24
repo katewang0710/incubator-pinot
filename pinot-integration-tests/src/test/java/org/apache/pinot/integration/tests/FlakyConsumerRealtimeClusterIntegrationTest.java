@@ -20,28 +20,20 @@ package org.apache.pinot.integration.tests;
 
 import java.lang.reflect.Constructor;
 import java.util.Random;
-import org.apache.pinot.spi.data.Schema;
+import java.util.Set;
 import org.apache.pinot.spi.data.readers.GenericRow;
 import org.apache.pinot.spi.stream.PartitionLevelConsumer;
 import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.stream.StreamConsumerFactory;
 import org.apache.pinot.spi.stream.StreamLevelConsumer;
 import org.apache.pinot.spi.stream.StreamMetadataProvider;
-import org.apache.pinot.core.realtime.impl.kafka.KafkaStarterUtils;
-import org.testng.annotations.BeforeClass;
+import org.apache.pinot.tools.utils.KafkaStarterUtils;
 
 
 /**
  * Integration test that simulates a flaky Kafka consumer.
  */
 public class FlakyConsumerRealtimeClusterIntegrationTest extends RealtimeClusterIntegrationTest {
-
-  @BeforeClass
-  @Override
-  public void setUp()
-      throws Exception {
-    super.setUp();
-  }
 
   @Override
   protected String getStreamConsumerFactoryClassName() {
@@ -52,13 +44,13 @@ public class FlakyConsumerRealtimeClusterIntegrationTest extends RealtimeCluster
     private StreamLevelConsumer _streamLevelConsumer;
     private Random _random = new Random();
 
-    public FlakyStreamLevelConsumer(String clientId, String tableName, StreamConfig streamConfig, Schema schema,
-        String groupId) {
+    public FlakyStreamLevelConsumer(String clientId, String tableName, StreamConfig streamConfig,
+        Set<String> fieldsToRead, String groupId) {
       try {
         final Constructor constructor = Class.forName(KafkaStarterUtils.KAFKA_STREAM_LEVEL_CONSUMER_CLASS_NAME)
-            .getConstructor(String.class, String.class, StreamConfig.class, Schema.class, String.class);
-        _streamLevelConsumer = (StreamLevelConsumer) constructor
-            .newInstance(clientId, tableName, streamConfig, schema, groupId);
+            .getConstructor(String.class, String.class, StreamConfig.class, Set.class, String.class);
+        _streamLevelConsumer =
+            (StreamLevelConsumer) constructor.newInstance(clientId, tableName, streamConfig, fieldsToRead, groupId);
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -104,15 +96,16 @@ public class FlakyConsumerRealtimeClusterIntegrationTest extends RealtimeCluster
   }
 
   public static class FlakyStreamFactory extends StreamConsumerFactory {
+
     @Override
     public PartitionLevelConsumer createPartitionLevelConsumer(String clientId, int partition) {
       throw new UnsupportedOperationException();
     }
 
     @Override
-    public StreamLevelConsumer createStreamLevelConsumer(String clientId, String tableName, Schema schema,
+    public StreamLevelConsumer createStreamLevelConsumer(String clientId, String tableName, Set<String> fieldsToRead,
         String groupId) {
-      return new FlakyStreamLevelConsumer(clientId, tableName, _streamConfig, schema, groupId);
+      return new FlakyStreamLevelConsumer(clientId, tableName, _streamConfig, fieldsToRead, groupId);
     }
 
     @Override

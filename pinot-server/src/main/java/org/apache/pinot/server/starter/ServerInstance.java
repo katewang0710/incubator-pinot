@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.LongAccumulator;
 import org.apache.helix.HelixManager;
+import org.apache.pinot.common.function.FunctionRegistry;
 import org.apache.pinot.common.metrics.MetricsHelper;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
@@ -71,6 +72,8 @@ public class ServerInstance {
     _instanceDataManager = (InstanceDataManager) Class.forName(instanceDataManagerClassName).newInstance();
     _instanceDataManager.init(serverConf.getInstanceDataManagerConfig(), helixManager, _serverMetrics);
 
+    // Initialize FunctionRegistry before starting the query executor
+    FunctionRegistry.init();
     String queryExecutorClassName = serverConf.getQueryExecutorClassName();
     LOGGER.info("Initializing query executor of class: {}", queryExecutorClassName);
     _queryExecutor = (QueryExecutor) Class.forName(queryExecutorClassName).newInstance();
@@ -100,8 +103,14 @@ public class ServerInstance {
     LOGGER.info("Finish initializing server instance");
   }
 
-  public void start() {
-    Preconditions.checkState(!_started, "Server instance is already started");
+  public synchronized void start() {
+    // This method is called when Helix starts a new ZK session, and can be called multiple times. We only need to start
+    // the server instance once, and simply ignore the following invocations.
+    if (_started) {
+      LOGGER.info("Server instance is already running, skipping the start");
+      return;
+    }
+
     LOGGER.info("Starting server instance");
 
     LOGGER.info("Starting instance data manager");
@@ -111,13 +120,13 @@ public class ServerInstance {
     LOGGER.info("Starting query scheduler");
     _queryScheduler.start();
     LOGGER.info("Starting query server");
-    new Thread(_queryServer).start();
+    _queryServer.start();
 
     _started = true;
     LOGGER.info("Finish starting server instance");
   }
 
-  public void shutDown() {
+  public synchronized void shutDown() {
     Preconditions.checkState(_started, "Server instance is not running");
     LOGGER.info("Shutting down server instance");
 
@@ -129,7 +138,8 @@ public class ServerInstance {
     _queryExecutor.shutDown();
     LOGGER.info("Shutting down instance data manager");
     _instanceDataManager.shutDown();
-
+    LOGGER.info("Shutting down metrics registry");
+    _serverMetrics.getMetricsRegistry().shutdown();
     _started = false;
     LOGGER.info("Finish shutting down server instance");
   }

@@ -20,12 +20,13 @@ package org.apache.pinot.core.data.recordtransformer;
 
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.ingestion.TransformConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.readers.GenericRow;
-import org.apache.pinot.core.data.function.FunctionExpressionEvaluator;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.pinot.core.data.function.FunctionEvaluator;
+import org.apache.pinot.core.data.function.FunctionEvaluatorFactory;
 
 
 /**
@@ -34,20 +35,22 @@ import org.slf4j.LoggerFactory;
  * regular column for other record transformers.
  */
 public class ExpressionTransformer implements RecordTransformer {
-  private static final Logger LOGGER = LoggerFactory.getLogger(ExpressionTransformer.class);
 
-  private final Map<String, FunctionExpressionEvaluator> _expressionEvaluators = new HashMap<>();
+  private final Map<String, FunctionEvaluator> _expressionEvaluators = new HashMap<>();
 
-  public ExpressionTransformer(Schema schema) {
+  public ExpressionTransformer(TableConfig tableConfig, Schema schema) {
+    if (tableConfig.getIngestionConfig() != null && tableConfig.getIngestionConfig().getTransformConfigs() != null) {
+      for (TransformConfig transformConfig : tableConfig.getIngestionConfig().getTransformConfigs()) {
+        _expressionEvaluators.put(transformConfig.getColumnName(),
+            FunctionEvaluatorFactory.getExpressionEvaluator(transformConfig.getTransformFunction()));
+      }
+    }
     for (FieldSpec fieldSpec : schema.getAllFieldSpecs()) {
-      if (!fieldSpec.isVirtualColumn()) {
-        String expression = fieldSpec.getTransformFunction();
-        if (expression != null) {
-          try {
-            _expressionEvaluators.put(fieldSpec.getName(), new FunctionExpressionEvaluator(expression));
-          } catch (Exception e) {
-            LOGGER.error("Caught exception while constructing expression evaluator for: {}, skipping", expression, e);
-          }
+      String fieldName = fieldSpec.getName();
+      if (!fieldSpec.isVirtualColumn() && !_expressionEvaluators.containsKey(fieldName)) {
+        FunctionEvaluator functionEvaluator = FunctionEvaluatorFactory.getExpressionEvaluator(fieldSpec);
+        if (functionEvaluator != null) {
+          _expressionEvaluators.put(fieldName, functionEvaluator);
         }
       }
     }
@@ -55,12 +58,14 @@ public class ExpressionTransformer implements RecordTransformer {
 
   @Override
   public GenericRow transform(GenericRow record) {
-    for (Map.Entry<String, FunctionExpressionEvaluator> entry : _expressionEvaluators.entrySet()) {
+    for (Map.Entry<String, FunctionEvaluator> entry : _expressionEvaluators.entrySet()) {
       String column = entry.getKey();
-      // Skip transformation if column value already exist
+      FunctionEvaluator transformFunctionEvaluator = entry.getValue();
+      // Skip transformation if column value already exist.
       // NOTE: column value might already exist for OFFLINE data
       if (record.getValue(column) == null) {
-        record.putValue(column, entry.getValue().evaluate(record));
+        Object result = transformFunctionEvaluator.evaluate(record);
+        record.putValue(column, result);
       }
     }
     return record;

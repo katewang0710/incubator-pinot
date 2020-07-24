@@ -27,28 +27,27 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import org.apache.commons.lang.RandomStringUtils;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.response.broker.GroupByResult;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
-import org.apache.pinot.core.query.aggregation.function.AggregationFunctionFactory;
+import org.apache.pinot.core.query.aggregation.function.DistinctCountAggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.SumAggregationFunction;
 import org.apache.pinot.core.query.aggregation.groupby.AggregationGroupByTrimmingService;
 import org.apache.pinot.core.query.aggregation.groupby.GroupKeyGenerator;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 
+@SuppressWarnings({"rawtypes", "unchecked"})
 public class AggregationGroupByTrimmingServiceTest {
   private static final long RANDOM_SEED = System.currentTimeMillis();
   private static final Random RANDOM = new Random(RANDOM_SEED);
   private static final String ERROR_MESSAGE = "Random seed: " + RANDOM_SEED;
 
-  private AggregationInfo aggregationInfo = new AggregationInfo().setAggregationType("SUM");
-  private static final AggregationFunction SUM = AggregationFunctionFactory.getAggregationFunction(new AggregationInfo().setAggregationType("SUM"), new BrokerRequest());
-  private static final AggregationFunction DISTINCTCOUNT =
-      AggregationFunctionFactory.getAggregationFunction(new AggregationInfo().setAggregationType("DISTINCTCOUNT"), new BrokerRequest());
-  private static final AggregationFunction[] AGGREGATION_FUNCTIONS = {SUM, DISTINCTCOUNT};
+  private static final AggregationFunction[] AGGREGATION_FUNCTIONS =
+      {new SumAggregationFunction(ExpressionContext.forIdentifier("sumColumn")), new DistinctCountAggregationFunction(
+          ExpressionContext.forIdentifier("distinctColumn"))};
   private static final int NUM_GROUP_KEYS = 3;
   private static final int GROUP_BY_TOP_N = 100;
   private static final int NUM_GROUPS = 50000;
@@ -81,7 +80,6 @@ public class AggregationGroupByTrimmingServiceTest {
     _trimmingService = new AggregationGroupByTrimmingService(AGGREGATION_FUNCTIONS, GROUP_BY_TOP_N);
   }
 
-  @SuppressWarnings("unchecked")
   @Test
   public void testTrimming() {
     // Test Server side trimming

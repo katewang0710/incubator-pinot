@@ -20,19 +20,21 @@ package org.apache.pinot.core.data.table;
 
 import com.google.common.collect.Lists;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import org.apache.pinot.common.request.AggregationInfo;
-import org.apache.pinot.common.request.SelectionSort;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.query.aggregation.function.AggregationFunction;
-import org.apache.pinot.core.query.aggregation.function.AggregationFunctionUtils;
+import org.apache.pinot.core.query.aggregation.function.AvgAggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.DistinctCountAggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.MaxAggregationFunction;
+import org.apache.pinot.core.query.aggregation.function.SumAggregationFunction;
 import org.apache.pinot.core.query.aggregation.function.customobject.AvgPair;
+import org.apache.pinot.core.query.request.context.ExpressionContext;
+import org.apache.pinot.core.query.request.context.OrderByExpressionContext;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.testng.Assert;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -41,15 +43,10 @@ import org.testng.annotations.Test;
 /**
  * Tests the functionality of {@link @TableResizer}
  */
+@SuppressWarnings({"rawtypes", "unchecked"})
 public class TableResizerTest {
-
-  private DataSchema dataSchema;
-  private List<AggregationInfo> aggregationInfos;
-  private List<SelectionSort> selectionSort;
-  private SelectionSort sel1;
-  private SelectionSort sel2;
-  private SelectionSort sel3;
-  private TableResizer _tableResizer;
+  private DataSchema _dataSchema;
+  private AggregationFunction[] _aggregationFunctions;
 
   private int trimToSize = 3;
   private Map<Key, Record> _recordsMap;
@@ -57,34 +54,13 @@ public class TableResizerTest {
   private List<Key> _keys;
 
   @BeforeClass
-  public void beforeClass() {
-    dataSchema = new DataSchema(new String[]{"d1", "d2", "d3", "sum(m1)", "max(m2)", "distinctcount(m3)", "avg(m4)"},
+  public void setUp() {
+    _dataSchema = new DataSchema(new String[]{"d1", "d2", "d3", "sum(m1)", "max(m2)", "distinctcount(m3)", "avg(m4)"},
         new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING, DataSchema.ColumnDataType.INT, DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.DOUBLE, DataSchema.ColumnDataType.OBJECT, DataSchema.ColumnDataType.OBJECT});
-    AggregationInfo agg1 = new AggregationInfo();
-    Map<String, String> params1 = new HashMap<>(1);
-    params1.put("column", "m1");
-    agg1.setAggregationParams(params1);
-    agg1.setAggregationType("sum");
-    AggregationInfo agg2 = new AggregationInfo();
-    Map<String, String> params2 = new HashMap<>(1);
-    params2.put("column", "m2");
-    agg2.setAggregationParams(params2);
-    agg2.setAggregationType("max");
-    AggregationInfo agg3 = new AggregationInfo();
-    Map<String, String> params3 = new HashMap<>(1);
-    params3.put("column", "m3");
-    agg3.setAggregationParams(params3);
-    agg3.setAggregationType("distinctcount");
-    AggregationInfo agg4 = new AggregationInfo();
-    Map<String, String> params4 = new HashMap<>(1);
-    params4.put("column", "m4");
-    agg4.setAggregationParams(params4);
-    agg4.setAggregationType("avg");
-    aggregationInfos = Lists.newArrayList(agg1, agg2, agg3, agg4);
-
-    sel1 = new SelectionSort();
-    sel2 = new SelectionSort();
-    sel3 = new SelectionSort();
+    _aggregationFunctions = new AggregationFunction[]{new SumAggregationFunction(
+        ExpressionContext.forIdentifier("m1")), new MaxAggregationFunction(
+        ExpressionContext.forIdentifier("m2")), new DistinctCountAggregationFunction(
+        ExpressionContext.forIdentifier("m3")), new AvgAggregationFunction(ExpressionContext.forIdentifier("m4"))};
 
     IntOpenHashSet i1 = new IntOpenHashSet();
     i1.add(1);
@@ -135,91 +111,73 @@ public class TableResizerTest {
     // TotalRecords=5; trimToSize=3; numRecordsToEvict=2
 
     // d1 asc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    TableResizer tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(0))); // a, b, c
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
 
     // d1 desc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(2))); // c, c, c
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4)));
 
-    // d1 asc, d3 desc (tie breaking with 2nd comparator
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    sel2.setColumn("d3");
-    sel2.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    // d1 asc, d3 desc (tie breaking with 2nd comparator)
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d3"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(0))); // 10, 10, 300
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4)));
 
     // d2 asc
-    sel1.setColumn("d2");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d2"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(0))); // 10, 10, 50
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
 
     // d1 asc, sum(m1) desc, max(m2) desc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    sel2.setColumn("sum(m1)");
-    sel2.setIsAsc(false);
-    sel3.setColumn("max(m2)");
-    sel3.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1, sel2, sel3);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("sum(m1)"), false),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("max(m2)"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(0))); // a, b, (c (30, 300))
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
     Assert.assertTrue(recordsMap.containsKey(_keys.get(2)));
 
     // object type avg(m4) asc
-    sel1.setColumn("avg(m4)");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Collections
+        .singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("avg(m4)"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4))); // 2, 3, 3.33,
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
 
     // non-comparable intermediate result
-    sel1.setColumn("distinctcount(m3)");
-    sel1.setIsAsc(false);
-    sel2.setColumn("d1");
-    sel2.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("distinctcount(m3)"), false),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4))); // 6, 5, 4 (b)
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
@@ -230,36 +188,29 @@ public class TableResizerTest {
     trimToSize = 2;
 
     // d1 asc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(0))); // a, b
     Assert.assertTrue(recordsMap.containsKey(_keys.get(1)));
 
     // object type avg(m4) asc
-    sel1.setColumn("avg(m4)");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Collections
+        .singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("avg(m4)"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4))); // 2, 3, 3.33,
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
 
     // non-comparable intermediate result
-    sel1.setColumn("distinctcount(m3)");
-    sel1.setIsAsc(false);
-    sel2.setColumn("d1");
-    sel2.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("distinctcount(m3)"), false),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    _tableResizer.resizeRecordsMap(recordsMap, trimToSize);
+    tableResizer.resizeRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(recordsMap.size(), trimToSize);
     Assert.assertTrue(recordsMap.containsKey(_keys.get(4))); // 6, 5, 4 (b)
     Assert.assertTrue(recordsMap.containsKey(_keys.get(3)));
@@ -278,12 +229,10 @@ public class TableResizerTest {
     Map<Key, Record> recordsMap;
 
     // d1 asc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    TableResizer tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(sortedRecords.size(), trimToSize);
     order = new int[]{0, 1};
     for (int i = 0; i < order.length; i++) {
@@ -292,7 +241,7 @@ public class TableResizerTest {
 
     // d1 asc - trim to 1
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
     Assert.assertEquals(sortedRecords.size(), 1);
     order = new int[]{0};
     for (int i = 0; i < order.length; i++) {
@@ -300,14 +249,11 @@ public class TableResizerTest {
     }
 
     // d1 asc, d3 desc (tie breaking with 2nd comparator)
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    sel2.setColumn("d3");
-    sel2.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d3"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(sortedRecords.size(), trimToSize);
     order = new int[]{0, 1, 4};
     for (int i = 0; i < order.length; i++) {
@@ -316,7 +262,7 @@ public class TableResizerTest {
 
     // d1 asc, d3 desc (tie breaking with 2nd comparator) - trim 1
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
     Assert.assertEquals(sortedRecords.size(), 1);
     order = new int[]{0};
     for (int i = 0; i < order.length; i++) {
@@ -324,16 +270,12 @@ public class TableResizerTest {
     }
 
     // d1 asc, sum(m1) desc, max(m2) desc
-    sel1.setColumn("d1");
-    sel1.setIsAsc(true);
-    sel2.setColumn("sum(m1)");
-    sel2.setIsAsc(false);
-    sel3.setColumn("max(m2)");
-    sel3.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1, sel2, sel3);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("sum(m1)"), false),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("max(m2)"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, trimToSize);
     Assert.assertEquals(sortedRecords.size(), trimToSize);
     order = new int[]{0, 1, 2};
     for (int i = 0; i < order.length; i++) {
@@ -342,7 +284,7 @@ public class TableResizerTest {
 
     // trim 1
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, 1);
     Assert.assertEquals(sortedRecords.size(), 1);
     order = new int[]{0};
     for (int i = 0; i < order.length; i++) {
@@ -350,14 +292,11 @@ public class TableResizerTest {
     }
 
     // object type avg(m4) asc
-    sel1.setColumn("avg(m4)");
-    sel1.setIsAsc(true);
-    sel2.setColumn("d1");
-    sel2.setIsAsc(true);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("avg(m4)"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true)));
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, 10); // high trim to size
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, 10); // high trim to size
     Assert.assertEquals(sortedRecords.size(), recordsMap.size());
     order = new int[]{4, 3, 1, 0, 2};
     for (int i = 0; i < order.length; i++) {
@@ -365,14 +304,11 @@ public class TableResizerTest {
     }
 
     // non-comparable intermediate result
-    sel1.setColumn("distinctcount(m3)");
-    sel1.setIsAsc(false);
-    sel2.setColumn("avg(m4)");
-    sel2.setIsAsc(false);
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("distinctcount(m3)"), false),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("avg(m4)"), false)));
     recordsMap = new HashMap<>(_recordsMap);
-    sortedRecords = _tableResizer.resizeAndSortRecordsMap(recordsMap, recordsMap.size()); // equal trim to size
+    sortedRecords = tableResizer.resizeAndSortRecordsMap(recordsMap, recordsMap.size()); // equal trim to size
     Assert.assertEquals(sortedRecords.size(), recordsMap.size());
     order = new int[]{4, 3, 2, 1, 0};
     for (int i = 0; i < order.length; i++) {
@@ -387,43 +323,37 @@ public class TableResizerTest {
   public void testIntermediateRecord() {
 
     // d2
-    sel1.setColumn("d2");
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    TableResizer tableResizer = new TableResizer(_dataSchema, _aggregationFunctions,
+        Collections.singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d2"), true)));
     for (Map.Entry<Key, Record> entry : _recordsMap.entrySet()) {
       Key key = entry.getKey();
       Record record = entry.getValue();
-      TableResizer.IntermediateRecord intermediateRecord =
-          _tableResizer.getIntermediateRecord(key, record);
+      TableResizer.IntermediateRecord intermediateRecord = tableResizer.getIntermediateRecord(key, record);
       Assert.assertEquals(intermediateRecord._key, key);
       Assert.assertEquals(intermediateRecord._values.length, 1);
       Assert.assertEquals(intermediateRecord._values[0], record.getValues()[1]);
     }
 
     // sum(m1)
-    sel1.setColumn("sum(m1)");
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Collections
+        .singletonList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("sum(m1)"), true)));
     for (Map.Entry<Key, Record> entry : _recordsMap.entrySet()) {
       Key key = entry.getKey();
       Record record = entry.getValue();
-      TableResizer.IntermediateRecord intermediateRecord =
-          _tableResizer.getIntermediateRecord(key, record);
+      TableResizer.IntermediateRecord intermediateRecord = tableResizer.getIntermediateRecord(key, record);
       Assert.assertEquals(intermediateRecord._key, key);
       Assert.assertEquals(intermediateRecord._values.length, 1);
       Assert.assertEquals(intermediateRecord._values[0], record.getValues()[3]);
     }
 
     // d1, max(m2)
-    sel1.setColumn("d1");
-    sel2.setColumn("max(m2)");
-    selectionSort = Lists.newArrayList(sel1, sel2);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d1"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("max(m2)"), true)));
     for (Map.Entry<Key, Record> entry : _recordsMap.entrySet()) {
       Key key = entry.getKey();
       Record record = entry.getValue();
-      TableResizer.IntermediateRecord intermediateRecord =
-          _tableResizer.getIntermediateRecord(key, record);
+      TableResizer.IntermediateRecord intermediateRecord = tableResizer.getIntermediateRecord(key, record);
       Assert.assertEquals(intermediateRecord._key, key);
       Assert.assertEquals(intermediateRecord._values.length, 2);
       Assert.assertEquals(intermediateRecord._values[0], record.getValues()[0]);
@@ -431,16 +361,14 @@ public class TableResizerTest {
     }
 
     // d2, sum(m1), d3
-    sel1.setColumn("d2");
-    sel2.setColumn("sum(m1)");
-    sel3.setColumn("d3");
-    selectionSort = Lists.newArrayList(sel1, sel2, sel3);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Arrays
+        .asList(new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d2"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("sum(m1)"), true),
+            new OrderByExpressionContext(QueryContextConverterUtils.getExpression("d3"), true)));
     for (Map.Entry<Key, Record> entry : _recordsMap.entrySet()) {
       Key key = entry.getKey();
       Record record = entry.getValue();
-      TableResizer.IntermediateRecord intermediateRecord =
-          _tableResizer.getIntermediateRecord(key, record);
+      TableResizer.IntermediateRecord intermediateRecord = tableResizer.getIntermediateRecord(key, record);
       Assert.assertEquals(intermediateRecord._key, key);
       Assert.assertEquals(intermediateRecord._values.length, 3);
       Assert.assertEquals(intermediateRecord._values[0], record.getValues()[1]);
@@ -449,176 +377,17 @@ public class TableResizerTest {
     }
 
     // non-comparable intermediate result
-    sel1.setColumn("distinctcount(m3)");
-    selectionSort = Lists.newArrayList(sel1);
-    _tableResizer = new TableResizer(dataSchema, aggregationInfos, selectionSort);
-    AggregationFunction distinctCountFunction =
-        AggregationFunctionUtils.getAggregationFunctionContext(aggregationInfos.get(2)).getAggregationFunction();
+    tableResizer = new TableResizer(_dataSchema, _aggregationFunctions, Collections.singletonList(
+        new OrderByExpressionContext(QueryContextConverterUtils.getExpression("distinctcount(m3)"), true)));
+    AggregationFunction distinctCountFunction = _aggregationFunctions[2];
     for (Map.Entry<Key, Record> entry : _recordsMap.entrySet()) {
       Key key = entry.getKey();
       Record record = entry.getValue();
-      TableResizer.IntermediateRecord intermediateRecord =
-          _tableResizer.getIntermediateRecord(key, record);
+      TableResizer.IntermediateRecord intermediateRecord = tableResizer.getIntermediateRecord(key, record);
       Assert.assertEquals(intermediateRecord._key, key);
       Assert.assertEquals(intermediateRecord._values.length, 1);
-      Assert.assertEquals(intermediateRecord._values[0],
-          distinctCountFunction.extractFinalResult(record.getValues()[5]));
+      Assert
+          .assertEquals(intermediateRecord._values[0], distinctCountFunction.extractFinalResult(record.getValues()[5]));
     }
-  }
-
-  @Test
-  public void testResizerForSetBasedTable() {
-    String[] columns = new String[]{"STRING_COL"};
-    DataSchema.ColumnDataType[] columnDataTypes = new DataSchema.ColumnDataType[]{DataSchema.ColumnDataType.STRING};
-
-    DataSchema schema = new DataSchema(columns, columnDataTypes);
-    SelectionSort selectionSort = new SelectionSort();
-    selectionSort.setColumn("STRING_COL");
-    selectionSort.setIsAsc(true);
-
-    TableResizer tableResizer = new TableResizer(schema, Collections.emptyList(), Lists.newArrayList(selectionSort));
-    Set<Record> uniqueRecordsSet = new HashSet<>();
-
-    Record r1 = new Record(new Object[]{"B"});
-    Record r2 = new Record(new Object[]{"A"});
-    Record r3 = new Record(new Object[]{"D"});
-    Record r4 = new Record(new Object[]{"C"});
-    Record r5 = new Record(new Object[]{"E"});
-
-    uniqueRecordsSet.add(r1);
-    uniqueRecordsSet.add(r2);
-    uniqueRecordsSet.add(r3);
-    uniqueRecordsSet.add(r4);
-    uniqueRecordsSet.add(r5);
-
-    int trimSize = 5;
-    // no records should have been evicted
-    Set<Record> copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertTrue(copiedRecordSet.contains(r1));
-    Assert.assertTrue(copiedRecordSet.contains(r2));
-    Assert.assertTrue(copiedRecordSet.contains(r3));
-    Assert.assertTrue(copiedRecordSet.contains(r4));
-    Assert.assertTrue(copiedRecordSet.contains(r5));
-
-    List<Record> sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(trimSize, sorted.size());
-    Assert.assertEquals(r2, sorted.get(0));
-    Assert.assertEquals(r1, sorted.get(1));
-    Assert.assertEquals(r4, sorted.get(2));
-    Assert.assertEquals(r3, sorted.get(3));
-    Assert.assertEquals(r5, sorted.get(4));
-
-    trimSize = 3;
-    // D and E should have been evicted through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertTrue(copiedRecordSet.contains(r1));
-    Assert.assertTrue(copiedRecordSet.contains(r2));
-    Assert.assertTrue(copiedRecordSet.contains(r4));
-    Assert.assertFalse(copiedRecordSet.contains(r3));
-    Assert.assertFalse(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(trimSize, sorted.size());
-    Assert.assertEquals(r2, sorted.get(0));
-    Assert.assertEquals(r1, sorted.get(1));
-    Assert.assertEquals(r4, sorted.get(2));
-
-    trimSize = 2;
-    // A and B should have been retained through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertTrue(copiedRecordSet.contains(r1));
-    Assert.assertTrue(copiedRecordSet.contains(r2));
-    Assert.assertFalse(copiedRecordSet.contains(r3));
-    Assert.assertFalse(copiedRecordSet.contains(r4));
-    Assert.assertFalse(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(2, sorted.size());
-    Assert.assertEquals(r2, sorted.get(0));
-    Assert.assertEquals(r1, sorted.get(1));
-
-    trimSize = 1;
-    // A should have been retained through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertFalse(copiedRecordSet.contains(r1));
-    Assert.assertTrue(copiedRecordSet.contains(r2));
-    Assert.assertFalse(copiedRecordSet.contains(r3));
-    Assert.assertFalse(copiedRecordSet.contains(r4));
-    Assert.assertFalse(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(1, sorted.size());
-    Assert.assertEquals(r2, sorted.get(0));
-
-    // change the order to DESC
-    selectionSort.setIsAsc(false);
-    tableResizer = new TableResizer(schema, Collections.emptyList(), Lists.newArrayList(selectionSort));
-
-    trimSize = 5;
-    // no records should have been evicted
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertTrue(copiedRecordSet.contains(r1));
-    Assert.assertTrue(copiedRecordSet.contains(r2));
-    Assert.assertTrue(copiedRecordSet.contains(r3));
-    Assert.assertTrue(copiedRecordSet.contains(r4));
-    Assert.assertTrue(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(trimSize, sorted.size());
-    Assert.assertEquals(r5, sorted.get(0));
-    Assert.assertEquals(r3, sorted.get(1));
-    Assert.assertEquals(r4, sorted.get(2));
-    Assert.assertEquals(r1, sorted.get(3));
-    Assert.assertEquals(r2, sorted.get(4));
-
-    trimSize = 3;
-    // A and B should have been evicted through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertFalse(copiedRecordSet.contains(r1));
-    Assert.assertFalse(copiedRecordSet.contains(r2));
-    Assert.assertTrue(copiedRecordSet.contains(r4));
-    Assert.assertTrue(copiedRecordSet.contains(r3));
-    Assert.assertTrue(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(3, sorted.size());
-    Assert.assertEquals(r5, sorted.get(0));
-    Assert.assertEquals(r3, sorted.get(1));
-    Assert.assertEquals(r4, sorted.get(2));
-
-    trimSize = 2;
-    // D and E should have been retained through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertFalse(copiedRecordSet.contains(r1));
-    Assert.assertFalse(copiedRecordSet.contains(r2));
-    Assert.assertFalse(copiedRecordSet.contains(r4));
-    Assert.assertTrue(copiedRecordSet.contains(r3));
-    Assert.assertTrue(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(2, sorted.size());
-    Assert.assertEquals(r5, sorted.get(0));
-    Assert.assertEquals(r3, sorted.get(1));
-
-    trimSize = 1;
-    // E should have been retained through PQ
-    copiedRecordSet = new HashSet<>(uniqueRecordsSet);
-    tableResizer.resizeRecordsSet(copiedRecordSet, trimSize);
-    Assert.assertFalse(copiedRecordSet.contains(r1));
-    Assert.assertFalse(copiedRecordSet.contains(r2));
-    Assert.assertFalse(copiedRecordSet.contains(r4));
-    Assert.assertFalse(copiedRecordSet.contains(r3));
-    Assert.assertTrue(copiedRecordSet.contains(r5));
-
-    sorted = tableResizer.resizeAndSortRecordSet(copiedRecordSet, trimSize);
-    Assert.assertEquals(1, sorted.size());
-    Assert.assertEquals(r5, sorted.get(0));
   }
 }

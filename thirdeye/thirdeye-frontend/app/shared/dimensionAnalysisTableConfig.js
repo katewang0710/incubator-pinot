@@ -7,7 +7,7 @@ const COLUMN_CLASS = 'rootcause-dimensions-table__column';
 export const groupedHeaders = (advDimensionCount, overallChange) => [
   [
     {title: 'Top Anomalous Dimensions', className: 'rootcause-dimensions-table__header', colspan: advDimensionCount},
-    {title: '', className: 'rootcause-dimensions-table__header', colspan: 1},
+    {title: '', className: 'rootcause-dimensions-table__header', colspan: 2},
     {title: `Overall Change ${overallChange}`, className: 'rootcause-dimensions-table__header', colspan: 1},
     {title: '', className: 'rootcause-dimensions-table__header', colspan: 2}
   ]
@@ -19,35 +19,39 @@ export const groupedHeaders = (advDimensionCount, overallChange) => [
  */
 export const baseColumns = [
   {
-    propertyName: 'cob',
-    title: 'Current/Baseline',
-    className: `${COLUMN_CLASS} ${COLUMN_CLASS}--large-width`,
-    disableSorting: true,
+    propertyName: 'baselineNum',
+    title: 'Baseline',
+    className: `${COLUMN_CLASS} ${COLUMN_CLASS}--med-width baseline`,
     disableFiltering: true
   },
   {
-    propertyName: 'contributionToOverallChange',
-    component: 'custom/dimensions-table/change-bars',
-    title: 'Contribution to Overall Change',
-    className: `${COLUMN_CLASS} ${COLUMN_CLASS}--bar-cell`,
-    disableSorting: true,
+    propertyName: 'currentNum',
+    title: 'Current',
+    className: `${COLUMN_CLASS} ${COLUMN_CLASS}--med-width current`,
     disableFiltering: true
   },
   {
-    propertyName: 'percentageChange',
-    title: '% Change',
+    propertyName: 'percentageChangeNum',
     component: 'custom/dimensions-table/percent-change',
+    title: '% Change',
     className: `${COLUMN_CLASS} ${COLUMN_CLASS}--med-width`,
-    disableSorting: true,
     disableFiltering: true
   },
   {
-    propertyName: 'contributionChange',
-    title: 'Change in Contribution',
-    component: 'custom/dimensions-table/contribution-change',
+    propertyName: 'nodeSizeNum',
+    title: 'Node Size',
+    component: 'custom/dimensions-table/node-size',
     className: `${COLUMN_CLASS} ${COLUMN_CLASS}--med-width`,
-    disableSorting: true,
     disableFiltering: true
+  },
+  {
+    propertyName: 'costNum',
+    title: 'Cost',
+    component: 'custom/dimensions-table/change-bars',
+    className: `${COLUMN_CLASS} ${COLUMN_CLASS}--bar-cell`,
+    disableFiltering: true,
+    sortDirection: 'desc',
+    sortPrecedence: 0
   }
 ];
 

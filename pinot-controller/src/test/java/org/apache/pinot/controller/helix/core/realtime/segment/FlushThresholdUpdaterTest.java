@@ -19,11 +19,13 @@
 package org.apache.pinot.controller.helix.core.realtime.segment;
 
 import java.util.Arrays;
-import org.apache.pinot.common.config.TableNameBuilder;
 import org.apache.pinot.common.metadata.segment.LLCRealtimeSegmentZKMetadata;
 import org.apache.pinot.common.utils.LLCSegmentName;
+import org.apache.pinot.spi.stream.LongMsgOffset;
 import org.apache.pinot.spi.stream.PartitionLevelStreamConfig;
 import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.stream.StreamPartitionMsgOffset;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.testng.annotations.Test;
 
 import static org.mockito.Mockito.mock;
@@ -161,15 +163,15 @@ public class FlushThresholdUpdaterTest {
   }
 
   private CommittingSegmentDescriptor getCommittingSegmentDescriptor(long segmentSizeBytes) {
-    return new CommittingSegmentDescriptor(null, 0L, segmentSizeBytes);
+    return new CommittingSegmentDescriptor(null, new LongMsgOffset(0).toString(), segmentSizeBytes);
   }
 
   private LLCRealtimeSegmentZKMetadata getCommittingSegmentZKMetadata(long creationTime,
-      int sizeThresholdToFlushSegment, int totalRawDocs) {
+      int sizeThresholdToFlushSegment, int totalDocs) {
     LLCRealtimeSegmentZKMetadata committingSegmentZKMetadata = new LLCRealtimeSegmentZKMetadata();
     committingSegmentZKMetadata.setCreationTime(creationTime);
     committingSegmentZKMetadata.setSizeThresholdToFlushSegment(sizeThresholdToFlushSegment);
-    committingSegmentZKMetadata.setTotalRawDocs(totalRawDocs);
+    committingSegmentZKMetadata.setTotalDocs(totalDocs);
     return committingSegmentZKMetadata;
   }
 

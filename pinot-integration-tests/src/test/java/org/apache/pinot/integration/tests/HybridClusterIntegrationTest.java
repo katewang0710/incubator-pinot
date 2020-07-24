@@ -18,27 +18,28 @@
  */
 package org.apache.pinot.integration.tests;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.google.common.base.Function;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import javax.annotation.Nullable;
+import java.util.Map;
+
 import org.apache.commons.io.FileUtils;
-import org.apache.pinot.common.config.TableNameBuilder;
-import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.common.utils.CommonConstants;
-import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.controller.ControllerConf;
-import org.apache.pinot.core.realtime.impl.kafka.KafkaStarterUtils;
+import org.apache.pinot.spi.config.table.TableConfig;
+import org.apache.pinot.spi.config.table.TableType;
+import org.apache.pinot.spi.data.Schema;
+import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.apache.pinot.util.TestUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
+
+import com.fasterxml.jackson.databind.JsonNode;
 
 
 /**
@@ -50,14 +51,19 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
   private static final int NUM_OFFLINE_SEGMENTS = 8;
   private static final int NUM_REALTIME_SEGMENTS = 6;
 
-  private Schema _schema;
-
-  protected int getNumOfflineSegments() {
-    return NUM_OFFLINE_SEGMENTS;
+  @Override
+  protected String getBrokerTenant() {
+    return TENANT_NAME;
   }
 
-  protected int getNumRealtimeSegments() {
-    return NUM_REALTIME_SEGMENTS;
+  @Override
+  protected String getServerTenant() {
+    return TENANT_NAME;
+  }
+
+  @Override
+  protected void overrideServerConf(PinotConfiguration configuration) {
+    configuration.setProperty(CommonConstants.Server.CONFIG_OF_INSTANCE_RELOAD_CONSUMING_SEGMENT, true);
   }
 
   @BeforeClass
@@ -69,35 +75,29 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
     startHybridCluster();
 
     List<File> avroFiles = getAllAvroFiles();
-    List<File> offlineAvroFiles = getOfflineAvroFiles(avroFiles);
-    List<File> realtimeAvroFiles = getRealtimeAvroFiles(avroFiles);
+    List<File> offlineAvroFiles = getOfflineAvroFiles(avroFiles, NUM_OFFLINE_SEGMENTS);
+    List<File> realtimeAvroFiles = getRealtimeAvroFiles(avroFiles, NUM_REALTIME_SEGMENTS);
 
-    ExecutorService executor = Executors.newCachedThreadPool();
+    // Create and upload the schema and table config
+    Schema schema = createSchema();
+    addSchema(schema);
+    TableConfig offlineTableConfig = createOfflineTableConfig();
+    addTableConfig(offlineTableConfig);
+    addTableConfig(createRealtimeTableConfig(realtimeAvroFiles.get(0)));
 
-    // Create segments from Avro data
-    File schemaFile = getSchemaFile();
-    _schema = Schema.fromFile(schemaFile);
+    // Create and upload segments
     ClusterIntegrationTestUtils
-        .buildSegmentsFromAvro(offlineAvroFiles, 0, _segmentDir, _tarDir, getTableName(), false, null,
-            getRawIndexColumns(), _schema, executor);
-
-    // Push data into the Kafka topic
-    pushAvroIntoKafka(realtimeAvroFiles, getKafkaTopic(), executor);
-
-    // Load data into H2
-    setUpH2Connection(avroFiles, executor);
-
-    // Initialize query generator
-    setUpQueryGenerator(avroFiles, executor);
-
-    executor.shutdown();
-    executor.awaitTermination(10, TimeUnit.MINUTES);
-
-    // Create Pinot table
-    setUpTable(avroFiles.get(0));
-
-    // Upload all segments
+        .buildSegmentsFromAvro(offlineAvroFiles, offlineTableConfig, schema, 0, _segmentDir, _tarDir);
     uploadSegments(getTableName(), _tarDir);
+
+    // Push data into Kafka
+    pushAvroIntoKafka(realtimeAvroFiles);
+
+    // Set up the H2 connection
+    setUpH2Connection(avroFiles);
+
+    // Initialize the query generator
+    setUpQueryGenerator(avroFiles);
 
     // Wait for all documents loaded
     waitForAllDocsLoaded(600_000L);
@@ -110,9 +110,11 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
     startKafka();
 
     // Start the Pinot cluster
-    ControllerConf config = getDefaultControllerConfiguration();
-    config.setTenantIsolationEnabled(false);
-    startController(config);
+    Map<String, Object> properties = getDefaultControllerConfiguration();
+    properties.put(ControllerConf.CLUSTER_TENANT_ISOLATION_ENABLE, false);
+
+    startController(properties);
+    
     startBroker();
     startServers(2);
 
@@ -121,62 +123,12 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
     createServerTenant(TENANT_NAME, 1, 1);
   }
 
-  protected void setUpTable(File avroFile)
-      throws Exception {
-    String schemaName = _schema.getSchemaName();
-    addSchema(getSchemaFile(), schemaName);
-
-    String timeColumnName = _schema.getTimeColumnName();
-    Assert.assertNotNull(timeColumnName);
-    TimeUnit outgoingTimeUnit = _schema.getOutgoingTimeUnit();
-    Assert.assertNotNull(outgoingTimeUnit);
-    String timeType = outgoingTimeUnit.toString();
-
-    addHybridTable(getTableName(), useLlc(), KafkaStarterUtils.DEFAULT_KAFKA_BROKER, KafkaStarterUtils.DEFAULT_ZK_STR,
-        getKafkaTopic(), getRealtimeSegmentFlushSize(), avroFile, timeColumnName, timeType, schemaName, TENANT_NAME,
-        TENANT_NAME, getLoadMode(), getSortedColumn(), getInvertedIndexColumns(), getBloomFilterIndexColumns(),
-        getRawIndexColumns(), getTaskConfig(), getStreamConsumerFactoryClassName(), getSegmentPartitionConfig());
-  }
-
-  protected List<File> getAllAvroFiles()
-      throws Exception {
-    // Unpack the Avro files
-    int numSegments = unpackAvroData(_tempDir).size();
-
-    // Avro files has to be ordered as time series data
-    List<File> avroFiles = new ArrayList<>(numSegments);
-    for (int i = 1; i <= numSegments; i++) {
-      avroFiles.add(new File(_tempDir, "On_Time_On_Time_Performance_2014_" + i + ".avro"));
-    }
-
-    return avroFiles;
-  }
-
-  protected List<File> getOfflineAvroFiles(List<File> avroFiles) {
-    int numOfflineSegments = getNumOfflineSegments();
-    List<File> offlineAvroFiles = new ArrayList<>(numOfflineSegments);
-    for (int i = 0; i < numOfflineSegments; i++) {
-      offlineAvroFiles.add(avroFiles.get(i));
-    }
-    return offlineAvroFiles;
-  }
-
-  protected List<File> getRealtimeAvroFiles(List<File> avroFiles) {
-    int numSegments = avroFiles.size();
-    int numRealtimeSegments = getNumRealtimeSegments();
-    List<File> realtimeAvroFiles = new ArrayList<>(numRealtimeSegments);
-    for (int i = numSegments - numRealtimeSegments; i < numSegments; i++) {
-      realtimeAvroFiles.add(avroFiles.get(i));
-    }
-    return realtimeAvroFiles;
-  }
-
   @Test
   public void testSegmentListApi()
       throws Exception {
     {
       String jsonOutputStr = sendGetRequest(_controllerRequestURLBuilder.
-          forSegmentListAPIWithTableType(getTableName(), CommonConstants.Helix.TableType.OFFLINE.toString()));
+          forSegmentListAPIWithTableType(getTableName(), TableType.OFFLINE.toString()));
       JsonNode array = JsonUtils.stringToJsonNode(jsonOutputStr);
       // There should be one element in the array
       JsonNode element = array.get(0);
@@ -185,7 +137,7 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
     }
     {
       String jsonOutputStr = sendGetRequest(_controllerRequestURLBuilder.
-          forSegmentListAPIWithTableType(getTableName(), CommonConstants.Helix.TableType.REALTIME.toString()));
+          forSegmentListAPIWithTableType(getTableName(), TableType.REALTIME.toString()));
       JsonNode array = JsonUtils.stringToJsonNode(jsonOutputStr);
       // There should be one element in the array
       JsonNode element = array.get(0);
@@ -215,6 +167,12 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
   }
 
   @Test
+  public void testReload()
+      throws Exception {
+    super.testReload(true);
+  }
+
+  @Test
   public void testBrokerDebugOutput()
       throws Exception {
     String tableName = getTableName();
@@ -228,9 +186,30 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
 
   @Test
   @Override
+  public void testHardcodedQueries()
+      throws Exception {
+    super.testHardcodedQueries();
+  }
+
+  @Test
+  @Override
+  public void testHardcodedSqlQueries()
+      throws Exception {
+    super.testHardcodedSqlQueries();
+  }
+
+  @Test
+  @Override
   public void testQueriesFromQueryFile()
       throws Exception {
     super.testQueriesFromQueryFile();
+  }
+
+  @Test
+  @Override
+  public void testSqlQueriesFromQueryFile()
+      throws Exception {
+    super.testSqlQueriesFromQueryFile();
   }
 
   @Test
@@ -271,21 +250,19 @@ public class HybridClusterIntegrationTest extends BaseClusterIntegrationTestSet 
   public void tearDown()
       throws Exception {
     // Try deleting the tables and check that they have no routing table
-    final String tableName = getTableName();
+    String tableName = getTableName();
     dropOfflineTable(tableName);
     dropRealtimeTable(tableName);
 
-    // Routing table should not have any entries (length = 0) after deleting all tables
-    TestUtils.waitForCondition(new Function<Void, Boolean>() {
-      @Nullable
-      @Override
-      public Boolean apply(@Nullable Void aVoid) {
-        try {
-          JsonNode routingTableSnapshot = getDebugInfo("debug/routingTable/" + tableName).get("routingTableSnapshot");
-          return routingTableSnapshot.size() == 0;
-        } catch (Exception e) {
-          return null;
-        }
+    // Routing should be removed after deleting all tables
+    TestUtils.waitForCondition(aVoid -> {
+      try {
+        getDebugInfo("debug/routingTable/" + tableName);
+        return false;
+      } catch (FileNotFoundException e) {
+        return true;
+      } catch (Exception e) {
+        return null;
       }
     }, 60_000L, "Routing table is not empty after dropping all tables");
 
